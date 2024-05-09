@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## Version [2.1.5] - 2024-05-09
+
+### Fixed
+ 
+- [Issue #666](https://github.com/itsToggle/plex_debrid/issues/666) - Fixed issue with trakt sync not working properly in plex_debrid. Thanks to @mash2k3 for the fix!
+
 ## Version [2.1.4] - 2024-02-27
 
 ### Changed

@@ -14,6 +14,7 @@ RUN \
   rm main.zip && \
   mkdir /log && \
   mv plex_debrid-main/ plex_debrid && \
+  mv /plex_debrid_/trakt.py /plex_debrid/content/services/trakt.py && \
   python3 -m venv /venv && \
   source /venv/bin/activate && \
   pip3 install --upgrade pip && \
