@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Version [2.3.0] - 2024-06-19
+
+### Changed
+- plex_debrid: The orginal plex_debird repository files are now stored within this repository. This is to ensure that if the original repository is deleted or removed from GitHub this repositor will still function. It's also simpler than maintaining a forked repository.
+
+
 ## Version [2.2.0] - 2024-06-19
 
 ### Changed
@@ -17,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
  
 - [Issue #666](https://github.com/itsToggle/plex_debrid/issues/666) - Fixed issue with trakt sync not working properly in plex_debrid. Thanks to @mash2k3 for the fix!
+
 
 ## Version [2.1.4] - 2024-02-27
 

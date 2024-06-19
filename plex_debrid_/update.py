@@ -18,8 +18,8 @@ class PlexDebridUpdate(BaseUpdate):
             response = requests.get('https://raw.githubusercontent.com/itsToggle/plex_debrid/main/ui/ui_settings.py', timeout=5)
             response = response.content.decode('utf8')
 
-            if regex.search("(?<=')([0-9]+\.[0-9]+)(?=')", response):
-                v = regex.search("(?<=')([0-9]+\.[0-9]+)(?=')", response).group()
+            if regex.search(r"(?<=')([0-9]+\.[0-9]+)(?=')", response):
+                v = regex.search(r"(?<=')([0-9]+\.[0-9]+)(?=')", response).group()
 
                 if float(version) < float(v):
                     from .download import get_latest_release

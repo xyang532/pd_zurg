@@ -20,7 +20,7 @@ mono_crash.*
 [Dd]ebug/
 [Dd]ebugPublic/
 [Rr]elease/
-[Rr]eleases/
+#[Rr]eleases/
 x64/
 x86/
 [Ww][Ii][Nn]32/
@@ -363,7 +363,6 @@ MigrationBackup/
 FodyWeavers.xsd
 
 # debug	
-**/plex_debrid/
 **/data/
 **/log/
 *.env
