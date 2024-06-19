@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Version [2.3.0] - 2024-06-19
 
 ### Changed
-- plex_debrid: The orginal plex_debird repository files are now stored within this repository. This is to ensure that if the original repository is deleted or removed from GitHub this repositor will still function. It's also simpler than maintaining a forked repository.
+- plex_debrid: The original plex_debird repository files are now stored within this repository. This is to ensure that if the original repository is deleted or removed from GitHub, this repository will still function. It's also simpler than maintaining a forked repository.
 
 
 ## Version [2.2.0] - 2024-06-19
