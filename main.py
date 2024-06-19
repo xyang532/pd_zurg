@@ -9,7 +9,7 @@ from update import auto_update
 def main():
     logger = get_logger()
 
-    version = '2.1.5'
+    version = '2.2.0'
 
     ascii_art = f'''
                                                                           
@@ -82,10 +82,10 @@ def main():
             try:
                 p.setup.pd_setup()
                 pd_updater = p.update.PlexDebridUpdate()
-                if PDUPDATE:
-                    pd_updater.auto_update('plex_debrid',True)
-                else:
-                    pd_updater.auto_update('plex_debrid',False)
+                #if PDUPDATE:
+                    #pd_updater.auto_update('plex_debrid',True)
+                #else:
+                pd_updater.auto_update('plex_debrid',False)
             except Exception as e:
                 logger.error(f"An error occurred in the plex_debrid setup: {e}")
     except:

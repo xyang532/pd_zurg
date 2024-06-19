@@ -94,7 +94,7 @@ services:
      # - JF_ADDRESS
      # - JF_API_KEY
       ## Plex Debrid Optional Settings
-     # - PD_UPDATE=true   
+     # - PD_UPDATE=true # deprecated; plex_drbrid is no longer maintained 
      # - SHOW_MENU=false
      # - SEERR_API_KEY=
      # - SEERR_ADDRESS=
@@ -142,8 +142,8 @@ To enable either Overseerr or Jellyseerr integration with plex_debrid, the follo
 
 
 ## Automatic Updates
-If you would like to enable automatic updates for plex_debrid, utilize the ```PD_UPDATE``` environment variable. 
-Additional details can be found in the [pd_zurg Wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki#automatic-update-of-plex_debrid-to-the-latest-version)
+~~If you would like to enable automatic updates for plex_debrid, utilize the ```PD_UPDATE``` environment variable. 
+Additional details can be found in the [pd_zurg Wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki#automatic-update-of-plex_debrid-to-the-latest-version)~~ deprecated; plex_drbrid is no longer maintained
 
 If you would like to enable automatic updates for Zurg, utilize the ```ZURG_UPDATE``` environment variable. 
 Additional details can be found in the [pd_zurg Wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki#automatic-update-of-zurg-to-the-latest-version)
@@ -175,7 +175,7 @@ of this parameter has the format `<VARIABLE_NAME>=<VALUE>`.
 |`SHOW_MENU`| Enable the plex_debrid menu to show upon startup, requiring user interaction before the program runs. Conversely, if the plex_debrid menu is disabled, the program will automatically run upon successful startup. If used, the value must be ```true``` or ```false``` | `true` |
 |`PD_ENABLED`| Set the value "true" to enable the plex_debrid process | `false ` | | :heavy_check_mark: | |
 |`PD_LOGFILE`| Log file for plex_debrid. The log file will appear in the ```/config``` as ```plex_debrid.log```. If used, the value must be ```true``` or ```false``` | `false` |
-|`PD_UPDATE`| Enable automatic updates of plex_debrid. Adding this variable will enable automatic updates to the latest version of plex_debrid locally within the container. | `false` |
+|~~`PD_UPDATE`~~| ~~Enable automatic updates of plex_debrid. Adding this variable will enable automatic updates to the latest version of plex_debrid locally within the container.~~ deprecated; plex_drbrid is no longer maintained| `false` |
 |`AUTO_UPDATE_INTERVAL`| Interval between automatic update checks in hours. Vaules can be any positive [whole](https://www.oxfordlearnersdictionaries.com/us/definition/english/whole-number) or [decimal](https://www.oxfordreference.com/display/10.1093/oi/authority.20110803095705740;jsessionid=3FDC96CC0D79CCE69702661D025B9E9B#:~:text=The%20separator%20used%20between%20the,number%20expressed%20in%20decimal%20representation.) point based number. Ex. a value of .5 would yield thirty minutes, and 1.5 would yield one and a half hours | `24` |
 |`DUPLICATE_CLEANUP`| Automated cleanup of duplicate content in Plex.  | `false` |
 |`CLEANUP_INTERVAL`| Interval between duplicate cleanup in hours. Values can be any positive [whole](https://www.oxfordlearnersdictionaries.com/us/definition/english/whole-number) or [decimal](https://www.oxfordreference.com/display/10.1093/oi/authority.20110803095705740;jsessionid=3FDC96CC0D79CCE69702661D025B9E9B#:~:text=The%20separator%20used%20between%20the,number%20expressed%20in%20decimal%20representation.) point based number. Ex. a value of .5 would yield thirty minutes and 1.5 would yield one and a half hours | `24` |
