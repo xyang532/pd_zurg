@@ -185,6 +185,7 @@ of this parameter has the format `<VARIABLE_NAME>=<VALUE>`.
 |`ZURG_VERSION`| The version of Zurg to use. If enabled, the value should contain v0.9.x or v0.9.x-hotfix.x format | `latest` | | | |
 |`ZURG_UPDATE`| Enable automatic updates of Zurg. Adding this variable will enable automatic updates to the latest version of Zurg locally within the container. | `false` | | | |
 |`ZURG_LOG_LEVEL`| Set the log level for Zurg | `INFO` | | | |
+|`GITHUB_TOKEN`| GitHub Personal Token for use with Zurg private repo. Requires Zurg [sponsorship](https://github.com/sponsors/debridmediamanager) | `false ` | | | |
 |`JF_API_KEY`| The Jellyfin/Emby API Key ||| ||
 |`JF_ADDRESS`| The URL of your Jellyfin/Emby server. Example: http://192.168.0.101:8096 or http://jellyfin:8096 - format must include ```http://``` or ```https://``` and have no trailing characters after the port number (8096). E.g., ```/``` ||| |
 |`SEERR_API_KEY`| The Jellyseerr or Overseerr API Key ||| ||
@@ -216,6 +217,7 @@ pd_zurg supports the use of docker secrets for the following environment variabl
 
 | Variable       | Description                                  | Default | Required for rclone| Required for plex_debrid| Required for zurg|
 |----------------|----------------------------------------------|---------|:-:|:-:|:-:|
+|`GITHUB_TOKEN`| [GitHub Personal Token](https://github.com/settings/tokens) | ` ` | | | :heavy_check_mark:|
 |`RD_API_KEY`| [RealDebrid API key](https://real-debrid.com/apitoken) | ` ` | | :heavy_check_mark:| :heavy_check_mark:|
 |`AD_API_KEY`| [AllDebrid API key](https://alldebrid.com/apikeys/) | ` ` | | :heavy_check_mark:| :heavy_check_mark:|
 |`PLEX_USER`| The [Plex USERNAME](https://app.plex.tv/desktop/#!/settings/account) for your account | ` ` || :heavy_check_mark:|
@@ -234,6 +236,7 @@ services:
   pd_zurg:
     image: iampuid0/pd_zurg:latest
     secrets:
+      - github_token
       - rd_api_key
       - ad_api_key
       - plex_user
@@ -245,6 +248,8 @@ services:
       - seerr_address
 
 secrets:
+  github_token:
+    file: ./path/to/github_token.txt
   rd_api_key:
     file: ./path/to/rd_api_key.txt
   ad_api_key:
