@@ -1,26 +1,25 @@
-# pd_zurg
+<div align="center" style="max-width: 100%; height: auto;">
+  <a href="https://github.com/I-am-PUID-0/DMB">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://github.com/I-am-PUID-0/pd_zurg/assets/36779668/da811d50-18bf-4498-b508-2b1a6ed848bc">
+      <img alt="pd_zurg" src="https://github.com/I-am-PUID-0/pd_zurg/assets/36779668/da811d50-18bf-4498-b508-2b1a6ed848bc" style="max-width: 100%; height: auto;">
+    </picture>
+  </a>
+</div>
 
 ## Description
 A combined docker image for the unified deployment of **[itsToggle's](https://github.com/itsToggle)**, **[yowmamasita's](https://github.com/yowmamasita)**, and **[ncw's](https://github.com/ncw)** projects -- **[plex_debrid](https://github.com/itsToggle/plex_debrid)**, **[zurg](https://github.com/debridmediamanager/zurg-testing)**, and **[rclone](https://github.com/rclone/rclone)**
 
 
+> [!IMPORTANT]
+> Docker Desktop **CANNOT** be used to run pd_zurg. \
+> Docker Desktop does not support the [mount propagation](https://docs.docker.com/storage/bind-mounts/#configure-bind-propagation) required for rclone mounts. \
+> ![image](https://github.com/I-am-PUID-0/pd_zurg/assets/36779668/08887298-6a9c-4980-98bb-f119f8632a99)\
+> See the wiki for [alternative solutions](https://github.com/I-am-PUID-0/pd_zurg/wiki/Setup-Guides) to run pd_zurg on Windows through WSL2.
+
 ## Features
- - [Optional independent or combined utilization of plex_debrid and zurg w/ rclone](https://github.com/I-am-PUID-0/pd_zurg/wiki#optional-independent-or-combined-utilization-of--plex_debrid-and-zurg-w-rclone)
- - [Simultaneous independent rclone mounts](https://github.com/I-am-PUID-0/pd_zurg/wiki#simultaneous-independent-rclone-mounts)
- - [Bind-mounts rclone to the host](https://github.com/I-am-PUID-0/pd_zurg/wiki#bind-mounts-rclone-to-the-host)
- - [Debrid service API Key passed to zurg and plex_debrid via docker environment variable](https://github.com/I-am-PUID-0/pd_zurg/wiki#debrid-api-key-passed-to-zurg-and-plex_debrid-via-docker-environment-variable)
- - [rclone config automatically generated](https://github.com/I-am-PUID-0/pd_zurg/wiki#rclone-config-automatically-generated)
- - [rclone flags passed via docker environment variable](https://github.com/I-am-PUID-0/pd_zurg/wiki#rclone-flags-passed-via-docker-environment-variable)
- - [Fuse.conf ```user_allow_other``` applied within the container vs. the host](https://github.com/I-am-PUID-0/pd_zurg/wiki#fuseconf-user_allow_other-applied-within-the-container-vs-the-host)
- - [Plex server values passed to plex_debrid settings.json via docker environment variables](https://github.com/I-am-PUID-0/pd_zurg/wiki#plex-server-values-passed-to-plex_debrid-settingsjson-via-docker-environment-variables)
- - [Automatic Update of plex_debrid to the latest version](https://github.com/I-am-PUID-0/pd_zurg/wiki#automatic-update-of-plex_debrid-to-the-latest-version)
- - [Automatic Update of Zurg to the latest version](https://github.com/I-am-PUID-0/pd_zurg/wiki#automatic-update-of-zurg-to-the-latest-version)
- - [Version selection of zurg to the user-defined version](https://github.com/I-am-PUID-0/pd_zurg/wiki#version-selection-of-zurg-to-the-user-defined-version)
- - [Use of .env file for setting environment variables](https://github.com/I-am-PUID-0/pd_zurg/wiki#use-of-env-file-for-setting-environment-variables)
- - [Use of Docker Secret file for setting sensitive variables](https://github.com/I-am-PUID-0/pd_zurg#docker-secrets)
- - [Duplicate Cleanup](https://github.com/I-am-PUID-0/pd_zurg/wiki#duplicate-cleanup) 
- - [NFS Server for rclone](https://github.com/I-am-PUID-0/pd_zurg/wiki/Features#rclone-nfs-server) 
- - [Zurg username and password configuration](https://github.com/I-am-PUID-0/pd_zurg/wiki/Features#zurg_user--zurg_pass)
+
+See the pd_zurg [Wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki) for a full list of features and settings
 
 ## Docker Hub
 A prebuilt image is hosted on [docker hub](https://hub.docker.com/r/iampuid0/pd_zurg) 
