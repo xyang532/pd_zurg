@@ -1,0 +1,24 @@
+﻿name: Test Discord Webhook
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-discord-webhook:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Post test announcement to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          VERSION: "2.4.2"
+        run: |
+          RELEASE_NOTES="Fixed the removal of Zurg user and password if previously set in config.yml\nRclone: Introduced a Rclone startup check for the Zurg WebDAV URL to ensure the Zurg startup processes have finished before starting Rclone"
+          ANNOUNCEMENT_BODY="🚀 **New Release: ${{ env.VERSION }}**\n\n${RELEASE_NOTES}\n\n[Download the release](https://github.com/${{ github.repository }}/releases/tag/${{ env.VERSION }})"
+          ESCAPED_BODY=$(echo "$ANNOUNCEMENT_BODY" | jq -Rsa .)
+          curl -H "Content-Type: application/json" \
+               -d "{\"content\": ${ESCAPED_BODY}}" \
+               $DISCORD_WEBHOOK_URL
