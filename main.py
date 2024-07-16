@@ -1,7 +1,7 @@
 from base import *
 import plex_debrid_ as p
 import zurg as z 
-from rclone_rd import rclone
+from rclone import rclone
 from cleanup import duplicate_cleanup
 from update import auto_update
 
@@ -9,7 +9,7 @@ from update import auto_update
 def main():
     logger = get_logger()
 
-    version = '2.4.0'
+    version = '2.4.1'
 
     ascii_art = f'''
                                                                           

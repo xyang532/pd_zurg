@@ -45,12 +45,12 @@ try:
         "rclonemn_rd": {
             "regex": re.compile(rf'rclone {mount_type} {re.escape(RCLONEMN_RD)}:'),
             "error_message": f"The Rclone RD process for {RCLONEMN_RD} is not running.",
-            "should_run": str(ZURG).lower() == 'true' and RDAPIKEY
+            "should_run": str(ZURG).lower() == 'true' and RDAPIKEY and os.path.exists(f'/healthcheck/{RCLONEMN}')
         },
         "rclonemn_ad": {
             "regex": re.compile(rf'rclone {mount_type} {re.escape(RCLONEMN_AD)}:'),
             "error_message": f"The Rclone AD process for {RCLONEMN_AD} is not running.",
-            "should_run": str(ZURG).lower() == 'true' and ADAPIKEY
+            "should_run": str(ZURG).lower() == 'true' and ADAPIKEY and os.path.exists(f'/healthcheck/{RCLONEMN}')
         }
     }
 

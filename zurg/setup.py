@@ -10,13 +10,12 @@ def zurg_setup():
     zurg_config_base = '/zurg/config.yml'
   
     try:
-        if ZURGLOGLEVEL is not None:    # Needs addtional testing
+        if ZURGLOGLEVEL is not None:    # Needs additional testing
             os.environ['LOG_LEVEL'] = ZURGLOGLEVEL
             LOGLEVEL = os.environ.get('LOG_LEVEL')
-        #    logger.debug(f"'LOG_LEVEL' set to '{LOGLEVEL}' based on 'ZURG_LOG_LEVEL'")
-        #else:
-        #    logger.info("'ZURG_LOG_LEVEL' not set. Default log level INFO will be used for Zurg.")
-
+            # logger.debug(f"'LOG_LEVEL' set to '{LOGLEVEL}' based on 'ZURG_LOG_LEVEL'")
+        # else:
+            # logger.info("'ZURG_LOG_LEVEL' not set. Default log level INFO will be used for Zurg.")
     except Exception as e:
         logger.error(f"Error setting Zurg log level from 'ZURG_LOG_LEVEL': {e}")
 
@@ -41,21 +40,28 @@ def zurg_setup():
                     file.write(f"port: {port}\n")
                 else:
                     file.write(line)
-                    
+
     def update_creds(file_path, zurguser, zurgpass):
         logger.debug(f"Updating username and password in config file: {file_path}")
         with open(file_path, 'r') as file:
             lines = file.readlines()
-
         with open(file_path, 'w') as file:
             for line in lines:
-                if line.strip().startswith("username:") or line.strip().startswith("# username:"):
-                    file.write(f"username: {zurguser}\n")
-                elif line.strip().startswith("password:") or line.strip().startswith("# password:"):
-                    file.write(f"password: {zurgpass}\n")
+                if zurguser and zurgpass:
+                    if line.strip().startswith("username:") or line.strip().startswith("# username:"):
+                        file.write(f"username: {zurguser}\n")
+                    elif line.strip().startswith("password:") or line.strip().startswith("# password:"):
+                        file.write(f"password: {zurgpass}\n")
+                    else:
+                        file.write(line)
                 else:
-                    file.write(line)  
-                    
+                    if line.strip().startswith("username:"):
+                        file.write("# username:\n")
+                    elif line.strip().startswith("password:"):
+                        file.write("# password:\n")
+                    else:
+                        file.write(line)
+
     def plex_refresh(file_path):
         logger.info(f"Updating Plex Refresh in config file: {file_path}")
         yaml = YAML()
@@ -103,7 +109,7 @@ def zurg_setup():
             version_check()
 
     def setup_zurg_instance(config_dir, token, key_type):
-        try:    
+        try:
             zurg_executable_path = os.path.join(config_dir, 'zurg')
             config_file_path = os.path.join(config_dir, 'config.yml')
             refresh_file_path = os.path.join(config_dir, 'plex_refresh.py')
@@ -129,7 +135,7 @@ def zurg_setup():
                 logger.debug(f"Copying Zurg config from base: {zurg_config_base} to {config_file_path}")
                 shutil.copy(zurg_config_base, config_file_path)
             else:
-                logger.info(f"Using Zurg config found for {key_type} in {config_dir}")
+                logger.info(f"Using Zurg config found for {key_type} in {config_dir}")                
             if ZURGPORT:
                 port = ZURGPORT
                 logger.debug(f"Setting port {port} for Zurg w/ {key_type} instance")
@@ -137,10 +143,9 @@ def zurg_setup():
             else:    
                 port = random.randint(9001, 9999)
                 logger.debug(f"Selected port {port} for Zurg w/ {key_type} instance")
-                update_port(config_file_path, port)       
-            update_token(config_file_path, token)
-            if ZURGUSER and ZURGPASS:
-                update_creds(config_file_path, ZURGUSER, ZURGPASS)
+                update_port(config_file_path, port)
+            update_token(config_file_path, token)                
+            update_creds(config_file_path, ZURGUSER, ZURGPASS if ZURGUSER and ZURGPASS else None)          
             os.environ[f'ZURG_PORT_{key_type}'] = str(port)       
             logger.debug(f"Zurg w/ {key_type} instance configured to port: {port}")
             if PLEXREFRESH is not None and PLEXREFRESH.lower() == "true":
@@ -157,7 +162,7 @@ def zurg_setup():
                     if not PLEXMOUNT:
                         raise Exception("PLEX_MOUNT_DIR is required for Plex Refresh")
         except Exception as e:
-            raise Exception(f"Error setting up Zurg instance for {key_type}: {e}")        
+            raise Exception(f"Error setting up Zurg instance for {key_type}: {e}")
 
     try:
         if not RDAPIKEY and not ADAPIKEY:
@@ -189,4 +194,3 @@ def zurg_setup():
 
 if __name__ == "__main__":
     zurg_setup()
-
