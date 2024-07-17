@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## Version [2.4.3] - 2024-07-17
+
+### Fixed
+
+- Rclone: Fixed WebDAV URL check for Zurg startup processes to accept all 2xx status codes
+
+
 ## Version [2.4.2] - 2024-07-16
 
 ### Fixed
