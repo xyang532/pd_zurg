@@ -1,4 +1,5 @@
 from base import *
+from utils.logger import *
 from plexapi.server import PlexServer
 
 logger = get_logger()

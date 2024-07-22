@@ -1,7 +1,13 @@
-﻿FROM rclone/rclone:latest
+﻿FROM rclone/rclone:latest as rclone-stage
+
+FROM python:3.11-alpine
+COPY --from=rclone-stage /usr/local/bin/rclone /usr/local/bin/rclone
+
 WORKDIR /
+
 ADD . / ./
 ADD https://raw.githubusercontent.com/debridmediamanager/zurg-testing/main/config.yml /zurg/
+
 ENV \
   XDG_CONFIG_HOME=/config \
   TERM=xterm

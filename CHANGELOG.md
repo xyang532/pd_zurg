@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## Version [2.5.0] - 2024-07-22
+
+### Added
+
+- [Issue #59](https://github.com/I-am-PUID-0/pd_zurg/issues/59): Added PDZURG_LOG_SIZE environment variable to set the maximum size of the log file; Default is 10MB
+- [Issue #60](https://github.com/I-am-PUID-0/pd_zurg/issues/60): Added PD_REPO environment variable to set the plex_debrid repository to pull from; Default is `None`
+
+### Changed
+
+- Refactored to use common functions under utils 
+- Dockerfile: Updated to use the python:3.11-alpine image
+- plex_debrid: Updates for plex_debrid are now enabled with PD_UPDATE when PD_REPO is used
+
+### Notes
+
+- The PDZURG_LOG_SIZE environment variable only applies to the pd_zurg log file; not the Zurg or plex_debrid log files. 
+
+- The PD_REPO environment variable is used to set the plex_debrid repository to pull from. If used, the value must be a comma seperated list for the GitHub username,repository_name,and optionally the branch; e.g., PD_REPO=itsToggle,plex_debrid,main - the branch is defaulted to main if not specified
+
+- PD_UPDATE is only functional when PD_REPO is used
+
+
 ## Version [2.4.3] - 2024-07-17
 
 ### Fixed

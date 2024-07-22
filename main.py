@@ -1,4 +1,5 @@
 from base import *
+from utils.logger import *
 import plex_debrid_ as p
 import zurg as z 
 from rclone import rclone
@@ -9,7 +10,7 @@ from update import auto_update
 def main():
     logger = get_logger()
 
-    version = '2.4.3'
+    version = '2.5.0'
 
     ascii_art = f'''
                                                                           
@@ -82,10 +83,13 @@ def main():
             try:
                 p.setup.pd_setup()
                 pd_updater = p.update.PlexDebridUpdate()
-                #if PDUPDATE:
-                    #pd_updater.auto_update('plex_debrid',True)
-                #else:
-                pd_updater.auto_update('plex_debrid',False)
+                if PDUPDATE:
+                    pd_updater.auto_update('plex_debrid',True)
+                elif PDREPO:
+                    p.download.get_latest_release()
+                    pd_updater.auto_update('plex_debrid',False)
+                else:
+                    pd_updater.auto_update('plex_debrid',False)
             except Exception as e:
                 logger.error(f"An error occurred in the plex_debrid setup: {e}")
     except:

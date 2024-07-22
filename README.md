@@ -1,5 +1,5 @@
 ﻿<div align="center" style="max-width: 100%; height: auto;">
-  <a href="https://github.com/I-am-PUID-0/DMB">
+  <a href="https://github.com/I-am-PUID-0/pd_zurg">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="https://github.com/I-am-PUID-0/pd_zurg/assets/36779668/da811d50-18bf-4498-b508-2b1a6ed848bc">
       <img alt="pd_zurg" src="https://github.com/I-am-PUID-0/pd_zurg/assets/36779668/da811d50-18bf-4498-b508-2b1a6ed848bc" style="max-width: 100%; height: auto;">
@@ -97,6 +97,7 @@ services:
      # - JF_API_KEY
       ## Plex Debrid Optional Settings
      # - PD_UPDATE=true # deprecated; plex_drbrid is no longer maintained 
+     # - PD_REPO=itsToggle,plex_debrid,main
      # - SHOW_MENU=false
      # - SEERR_API_KEY=
      # - SEERR_ADDRESS=
@@ -106,6 +107,7 @@ services:
      # - CLEANUP_INTERVAL=1
      # - PDZURG_LOG_LEVEL=DEBUG
      # - PDZURG_LOG_COUNT=2
+     # - PDZURG_LOG_SIZE=10M
     # Example to attach to gluetun vpn container if realdebrid blocks IP address 
     # network_mode: container:gluetun  
     devices:
@@ -179,12 +181,14 @@ of this parameter has the format `<VARIABLE_NAME>=<VALUE>`.
 |`SHOW_MENU`| Enable the plex_debrid menu to show upon startup, requiring user interaction before the program runs. Conversely, if the plex_debrid menu is disabled, the program will automatically run upon successful startup. If used, the value must be ```true``` or ```false``` | `true` |
 |`PD_ENABLED`| Set the value "true" to enable the plex_debrid process | `false ` | | :heavy_check_mark: | |
 |`PD_LOGFILE`| Log file for plex_debrid. The log file will appear in the ```/config``` as ```plex_debrid.log```. If used, the value must be ```true``` or ```false``` | `false` |
-|~~`PD_UPDATE`~~| ~~Enable automatic updates of plex_debrid. Adding this variable will enable automatic updates to the latest version of plex_debrid locally within the container.~~ deprecated; plex_drbrid is no longer maintained| `false` |
+|`PD_UPDATE`| Enable automatic updates of plex_debrid. Adding this variable will enable automatic updates to the latest version of plex_debrid locally within the container. Only enabled if PD_REPO is set| `false` |
+|`PD_REPO`| The repository to use for plex_debrid. If used, the value must be a comma seperated list for the GitHub username,repository name,and optionally the branch; e.g., "itsToggle,plex_debrid,main" | `None` |
 |`AUTO_UPDATE_INTERVAL`| Interval between automatic update checks in hours. Vaules can be any positive [whole](https://www.oxfordlearnersdictionaries.com/us/definition/english/whole-number) or [decimal](https://www.oxfordreference.com/display/10.1093/oi/authority.20110803095705740;jsessionid=3FDC96CC0D79CCE69702661D025B9E9B#:~:text=The%20separator%20used%20between%20the,number%20expressed%20in%20decimal%20representation.) point based number. Ex. a value of .5 would yield thirty minutes, and 1.5 would yield one and a half hours | `24` |
 |`DUPLICATE_CLEANUP`| Automated cleanup of duplicate content in Plex.  | `false` |
 |`CLEANUP_INTERVAL`| Interval between duplicate cleanup in hours. Values can be any positive [whole](https://www.oxfordlearnersdictionaries.com/us/definition/english/whole-number) or [decimal](https://www.oxfordreference.com/display/10.1093/oi/authority.20110803095705740;jsessionid=3FDC96CC0D79CCE69702661D025B9E9B#:~:text=The%20separator%20used%20between%20the,number%20expressed%20in%20decimal%20representation.) point based number. Ex. a value of .5 would yield thirty minutes and 1.5 would yield one and a half hours | `24` |
 |`PDZURG_LOG_LEVEL`| The level at which logs should be captured. See the python [Logging Levels](https://docs.python.org/3/library/logging.html#logging-levels) documentation for more details  | `INFO` |
 |`PDZURG_LOG_COUNT`| The number logs to retain. Result will be value + current log  | `2` |
+|`PDZURG_LOG_SIZE`| The size of the log file before it is rotated. Valid options are 'K' (kilobytes), 'M' (megabytes), and 'G' (gigabytes)  | `10M` |
 |`ZURG_ENABLED`| Set the value "true" to enable the Zurg process | `false ` | | | :heavy_check_mark:|
 |`ZURG_VERSION`| The version of Zurg to use. If enabled, the value should contain v0.9.x or v0.9.x-hotfix.x format | `latest` | | | |
 |`ZURG_UPDATE`| Enable automatic updates of Zurg. Adding this variable will enable automatic updates to the latest version of Zurg locally within the container. | `false` | | | |
