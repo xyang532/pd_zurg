@@ -15,7 +15,13 @@ def shutdown(signum, frame):
         full_path = os.path.join('/data', mount_point)
         if os.path.ismount(full_path):
             logger.info(f"Unmounting {full_path}...")
-            umount = subprocess.run(['umount', full_path], capture_output=True, text=True)
+            # Lazy FUSE unmount detaches immediately even when the mount is busy
+            # (e.g. Plex actively streaming/scanning), so the container stops
+            # cleanly instead of leaving a stale "Transport endpoint is not
+            # connected" mount. rclone then receives EOF and exits on its own.
+            umount = subprocess.run(['fusermount3', '-uz', full_path], capture_output=True, text=True)
+            if umount.returncode != 0:
+                umount = subprocess.run(['umount', '-l', full_path], capture_output=True, text=True)
             if umount.returncode == 0:
                 logger.info(f"Successfully unmounted {full_path}")
             else:
