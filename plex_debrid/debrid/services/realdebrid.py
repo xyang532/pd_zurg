@@ -140,12 +140,16 @@ def download(element, stream=True, query='', force=False):
                 response = post('https://api.real-debrid.com/rest/1.0/torrents/addMagnet', {'magnet': release.download[0]})
                 if hasattr(response, 'error') and response.error == 'infringing_file':
                     ui_print(f'[realdebrid]: torrent {release.title} marked as infringing... looking for another release.')
+                    time.sleep(0.5)
                     continue
                 elif hasattr(response, 'error') and response.error == 'too_many_active_downloads':
                     ui_print(f'[realdebrid]: unable to add torrent {release.title} due to too many active downloads.')
+                    time.sleep(2.0)
                     continue
                 elif not hasattr(response, "id"):
                     ui_print(f'[realdebrid]: unexpected error when adding torrent {release.title}.')
+                    # 没有 id 通常是被 RD 限流了;这里必须退避,否则会越失败冲得越猛
+                    time.sleep(1.0)
                     continue
                 time.sleep(1.0)
                 torrent_id = str(response.id)

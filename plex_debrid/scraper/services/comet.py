@@ -124,7 +124,7 @@ def scrape_imdb_movie(session: requests.Session, base_url: str, base64_config: s
 
 
 def scrape_imdb_series(session: requests.Session, base_url: str, base64_config: str, imdb_id: str, season: int = 1, episode: int = 1) -> list:
-    return collate_releases_from_response(request(get, session, f'{base_url}/{base64_config}/stream/series/{imdb_id}:{str(season)}:{str(episode)}.json'))
+    return collate_releases_from_response(request(get, session, f'{base_url}/{base64_config}/stream/series/{imdb_id}:{str(int(season))}:{str(int(episode))}.json'))
 
 
 def collate_releases_from_response(response: requests.Response) -> list:
@@ -149,20 +149,38 @@ def collate_releases_from_response(response: requests.Response) -> list:
 
         try:
             title = result.description.split("\n")[0]
+            # 新版 comet 的标题带 "\U0001F4C4 " 前缀,和 mediafusion 的 "\U0001F4C2 " 同理去掉
+            if title.startswith("\U0001F4C4 "):
+                title = title[2:]
             infohash = False
             if hasattr(result, "infoHash"):
                 infohash = result.infoHash
             else:
-                infohash_pattern = regex.compile(r"(?!.*playback\/)[a-fA-F0-9]{40}")
-                infohash = infohash_pattern.search(result.url).group()
+                match = None
+                # 新版 comet:infohash 在 behaviorHints.bingeGroup = "comet|<debrid>|<40位hash>"
+                if hasattr(result, "behaviorHints") and hasattr(result.behaviorHints, "bingeGroup"):
+                    match = regex.search(r"[a-fA-F0-9]{40}", str(result.behaviorHints.bingeGroup))
+                # 旧版 comet:直接从 url 里取(playback/ 链接不含 infohash,故排除)
+                if not match and hasattr(result, "url"):
+                    match = regex.search(r"(?!.*playback\/)[a-fA-F0-9]{40}", result.url)
+                infohash = match.group() if match else False
 
             if not infohash:
                 ui_print(f'[comet]: error: infohash not found for title: {title}')
                 continue
 
-            size = int(result.torrentSize) / 1000000000 if hasattr(result, "torrentSize") else 0
+            if hasattr(result, "torrentSize"):
+                size = int(result.torrentSize) / 1000000000
+            elif hasattr(result, "behaviorHints") and hasattr(result.behaviorHints, "videoSize"):
+                # 新版 comet 把体积放在 behaviorHints.videoSize;留 0 会让体积过滤器误杀全部结果。
+                # 未知体积时 comet 返回 -1,必须钳到 0,否则负体积会绕过下限过滤。
+                size = max(0, int(result.behaviorHints.videoSize)) / 1000000000
+            else:
+                size = 0
             links = ['magnet:?xt=urn:btih:' + infohash + '&dn=&tr=']
-            seeds = 0  # not available
+            # 新版 comet 的 description 里有 "\U0001F464 N" 做种数,取不到再退回 0
+            seeds = int(regex.search(r'(?<=\U0001F464 )([0-9]+)', result.description).group()) \
+                if regex.search(r'(?<=\U0001F464 )([0-9]+)', result.description) else 0
             source = regex.search(r'(?<=🔎 )(.*)(?=\n|$)', result.description).group() \
                 if regex.search(r'(?<=🔎 )(.*)(?=\n|$)', result.description) else "unknown"
             scraped_releases += [releases.release(

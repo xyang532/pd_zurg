@@ -767,7 +767,10 @@ class sort:
 
             def __init__(self, attribute, required, operator, value=None) -> None:
                 self.attribute = "cached"
-                self.weight = (required == "requirement")
+                # 原为 self.weight = (required == "requirement"),存成布尔;
+                # 而本类 apply() 判断的是 self.weight == "requirement"(字符串),
+                # 导致两个分支都进不去、规则完全失效。基类存的就是字符串,这里对齐。
+                self.weight = required
                 self.operator = operator
                 self.value = value
 
