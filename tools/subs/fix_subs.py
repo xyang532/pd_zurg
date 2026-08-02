@@ -123,23 +123,31 @@ def toks(s):
     return out
 
 
-def same_film(sub_title, movie_titles):
-    """**先确认是同一部片**,再谈时间轴。
+NOISE = {"bluray", "blu", "ray", "webrip", "web", "dl", "hdrip", "brrip", "dvdrip", "remux",
+         "x264", "x265", "h264", "h265", "hevc", "avc", "aac", "ac3", "dts", "hd", "ma",
+         "1080p", "720p", "2160p", "480p", "1080i", "chs", "cht", "eng", "chi", "zh", "cn",
+         "srt", "ass", "ssa", "sub", "简", "繁", "双语", "中英", "字幕", "国配", "特效"}
 
-    Plex 的字幕搜索是按片名关键词模糊匹配、不是按 IMDB 的:实测《不十分好莱坞》(imdb 正确)
-    返回的 10 条全是别的电影(What Just Happened / 野孩子 / WildOceanIMAX3D),因为
-    OpenSubtitles 压根没有这部片的中文字幕。而错片的时长可能刚好接近,时间码检查拦不住它。
+
+def same_film(sub_title, movie_titles):
+    """**双向覆盖率取大**,门槛 0.7。
+
+    单看"片名 token 被覆盖了多少"会被同系列电影骗过:《火焰杯》的 token 是
+    {harry,potter,goblet,fire},而《密室》的候选贡献 {harry,potter} 正好 50% —— 压线通过,
+    而区分度恰恰全在漏掉的那两个词上(实测踩到)。反过来只看候选覆盖率,又会被
+    长片名的缩写发布骗过。取两者的大者,再剥掉发布噪声词,两类都挡得住。
     """
-    st = toks(sub_title)
+    st = toks(sub_title) - NOISE
     if not st:
         return False, 0.0
-    best = 0.0
     for mt in movie_titles:
-        mtoks = toks(mt)
-        if not mtoks:
+        mt2 = toks(mt) - NOISE
+        if not mt2:
             continue
-        best = max(best, len(mtoks & st) / float(len(mtoks)))
-    return best >= MIN_TITLE_OVERLAP, best
+        inter = len(mt2 & st)
+        if max(inter / float(len(mt2)), inter / float(len(st))) >= 0.7:
+            return True, 1.0
+    return False, 0.0
 
 
 def score(title, res, file_name):
