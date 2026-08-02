@@ -94,7 +94,24 @@ def toks(s):
 NOISE = {"bluray", "blu", "ray", "webrip", "web", "dl", "hdrip", "brrip", "dvdrip", "remux",
          "x264", "x265", "h264", "h265", "hevc", "avc", "aac", "ac3", "dts", "hd", "ma",
          "1080p", "720p", "2160p", "480p", "1080i", "chs", "cht", "eng", "chi", "zh", "cn",
-         "srt", "ass", "ssa", "sub", "简", "繁", "双语", "中英", "字幕", "国配", "特效"}
+         "srt", "ass", "ssa", "sub", "简", "繁", "双语", "中英", "字幕", "国配", "特效",
+         "us", "uk", "proper", "repack", "extended", "criterion", "internal", "limited"}
+
+
+CUT = re.compile(r"[.\s_\-\[(]((19|20)\d{2}|S\d{1,2}(E\d{1,3})?)([.\s_\-\])]|$)", re.I)
+
+
+def clean_title(fname):
+    """从发布名里切出真正的片名 —— 年份或 SxxExx 之前的部分。
+
+    直接拿整个文件名当片名会**反过来咬自己**:`Cure.1997.Criterion.1080p...FLAC-SARTRE`
+    里的 criterion/flac/sartre 都会被算成片名 token,把重合率稀释到 0.33,于是正确的
+    `Cure.1997.720p.BluRay` 反被拦下。而这类片子(日文原名+中文译名)唯一带英文名的
+    恰恰只有文件名,切干净它是必需的。
+    """
+    base = os.path.splitext(str(fname or ""))[0]
+    m = CUT.search(base)
+    return base[:m.start()] if m else base
 
 
 def same_film(sub_title, movie_titles):
@@ -247,11 +264,19 @@ def main():
             continue                                   # 已有中文字幕,不动
 
         titles = [t for t in (md.get("originalTitle"), md.get("title"),
-                              md.get("grandparentTitle"), os.path.splitext(fname)[0]) if t]
-        queries = []
-        for t in (md.get("originalTitle"), md.get("title")):
-            if t:
-                queries.append("%s %s" % (t, md.get("year") or ""))
+                              md.get("grandparentTitle"), clean_title(fname)) if t]
+        # 剧集的 title 是**单集名**(如"跨维度电视2"),拿它去查字幕站必然空手 ——
+        # 中文字幕站按"剧名 + 季/集"索引。所以剧集改用 grandparentTitle + SxxExx。
+        ep = None
+        if md.get("grandparentTitle"):
+            ep = (int(md.get("parentIndex") or 0), int(md.get("index") or 0))
+            show = md["grandparentTitle"]
+            queries = ["%s S%02dE%02d" % (show, ep[0], ep[1]),
+                       "%s S%02d" % (show, ep[0]), show]
+            titles = [t for t in (show, md.get("originalTitle"), clean_title(fname)) if t]
+        else:
+            queries = ["%s %s" % (t, md.get("year") or "") for t in
+                       (clean_title(fname), md.get("originalTitle"), md.get("title")) if t]
         seen_ids, cands = set(), []
         for q in queries:
             for s in assrt_search(q.strip()):
@@ -265,6 +290,7 @@ def main():
         head = "%s (%.0f 分)" % (name[:36], dur / 60)
         if not cands:
             log("NONE", "%s -> assrt 无匹配片名的候选" % head)
+            done += 1
             continue
 
         probed = []
@@ -275,6 +301,8 @@ def main():
                 # 字幕 —— 必须**逐个文件**再验一次片名,否则会挑到同系列的另一部(实测踩到)
                 if not same_film(fn, titles):
                     continue
+                if ep and not re.search(r"(?<![0-9])S0*%dE0*%d(?![0-9])" % ep, fn, re.I):
+                    continue          # 整季包里要挑出**这一集**,不能随便拿一个
                 st2, raw = web(url)
                 if st2 == 402:
                     log("RATE", "撞到 assrt 速率上限,等 30 秒再继续")
@@ -293,12 +321,22 @@ def main():
                                "text": txt, "enc": enc})
         if not probed:
             log("NONE", "%s -> %d 个候选都下不到或时间码不合格" % (head, len(cands)))
+            done += 1
             continue
 
         truth, votes = consensus([p["last"] for p in probed])
         agree = [p for p in probed if abs(p["last"] - truth) <= 60.0]
         if not agree:
             log("NOFIX", "%s -> %d 个候选彼此不一致" % (head, len(probed)))
+            done += 1
+            continue
+        # 只有一个候选时没有佐证可依,退回一条宽松的绝对闸:末条不得早于片长的 75%。
+        # 实测《办公室 S05E21》:片长 33 分(加长版),而唯一候选是 21 分的电视播出版字幕,
+        # 差了 36% —— 共识机制在样本量为 1 时形同虚设,必须有这道兜底。
+        if votes == 1 and (dur - truth) > dur * 0.25:
+            log("NOFIX", "%s -> 仅 1 个候选且末条距片尾 %.0fs(%.0f%%),无佐证,不采用"
+                % (head, dur - truth, 100.0 * (dur - truth) / dur))
+            done += 1
             continue
         w = max(agree, key=lambda p: (p["rank"], p["n"]))
         lang_desc = {3: "双语", 2: "简中", 1: "繁中", 0: "未知"}[w["rank"]]
@@ -317,6 +355,7 @@ def main():
                     ctype="text/plain;charset=UTF-8", js=False)
         if st3 != 200:
             log("FAIL", "%s -> 上传失败 HTTP %s" % (head, st3))
+            done += 1
             continue
         log("UPLOAD", "%s -> %s" % (head, detail))
         done += 1
