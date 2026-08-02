@@ -17,7 +17,7 @@ import argparse, io, json, os, re, sys, time
 import urllib.request, urllib.parse, urllib.error
 
 LOG_PATH = "/log/subs.log"
-MAX_END_GAP = 300.0      # 末条距片尾超过这么多秒 -> 多半是别的剪辑版/枪版
+
 MIN_CUES = 100           # 条目太少不像完整字幕
 
 # 枪版类:片长、剪辑点、帧率都和零售版不同,时间轴必然对不上
@@ -31,8 +31,9 @@ ap.add_argument("--apply", action="store_true", help="真的改(默认干跑)")
 ap.add_argument("--lang", default="zh", help="字幕语言代码")
 ap.add_argument("--limit", type=int, default=5, help="单次最多处理几部")
 ap.add_argument("--only", default="", help="只处理片名含该子串的")
-ap.add_argument("--mode", default="bad", choices=["bad", "missing", "all"],
-                help="bad=只修枪版类;missing=只补没有中文字幕的;all=两者都做")
+ap.add_argument("--mode", default="bad", choices=["bad", "missing", "recheck", "all"],
+                help="bad=只修枪版类;missing=只补缺的;recheck=复查已挂的;all=全做")
+ap.add_argument("--probe", type=int, default=4, help="每部片实测几个候选来取共识")
 ap.add_argument("--sections", default="1,2", help="Plex 分区号,逗号分隔")
 args = ap.parse_args()
 
@@ -78,21 +79,35 @@ def cues(text):
     return out
 
 
-def check(stream_id, duration):
-    """把挂上的字幕拉回来量。返回 (是否合格, 说明)。这是本工具的证据来源。"""
+def measure(stream_id, duration):
+    """把挂上的字幕拉回来量时间码。返回 (条数, 首条, 末条) 或 None。"""
     st, b = px("GET", "/library/streams/%s?download=1" % stream_id, js=False)
     if st != 200:
-        return False, "取不到字幕内容 HTTP %s" % st
+        return None
     c = cues(b.decode("utf-8", "replace"))
     if len(c) < MIN_CUES * 2:
-        return False, "条目过少(%d)" % (len(c) // 2)
-    last, first = max(c), min(c)
+        return None
+    last = max(c)
     if last > duration + 5:
-        return False, "末条 %.0fs 超出片长 %.0fs" % (last, duration)
-    gap = duration - last
-    if gap > MAX_END_GAP:
-        return False, "末条距片尾 %.0fs(疑似别的剪辑版/枪版)" % gap
-    return True, "%d 条,首 %.0fs,末条距片尾 %.0fs" % (len(c) // 2, first, gap)
+        return None                      # 末条超出片长 = 肯定不是这个片子/这个剪辑版
+    return (len(c) // 2, min(c), last)
+
+
+def consensus(measures, tol=60.0):
+    """**判据是候选之间的一致性,不是某个绝对阈值。**
+
+    绝对阈值(原来是"末条距片尾 ≤300 秒")会误杀:大片片尾字幕能长达 14 分钟,实测多个
+    互相独立的哈利波特字幕都落在距片尾 840 秒 —— 几个不同来源一致指向同一位置,那个位置
+    就是最后一句台词的真实位置。而枪版的问题恰恰是它**偏离**了这个共识(实测早 356 秒)。
+    所以取末条时间的最大簇作为真值,簇外的判为不合格。
+    """
+    lasts = sorted(m[2] for m in measures)
+    best, bestn = None, 0
+    for x in lasts:
+        n = sum(1 for y in lasts if abs(y - x) <= tol)
+        if n > bestn:
+            best, bestn = x, n
+    return best, bestn
 
 
 STOP = {"the", "a", "an", "of", "and", "in", "on", "to", "for", "part", "le", "la"}
@@ -194,9 +209,10 @@ def main():
         if embedded:
             continue                                   # 片源自带中文,不动
         bad_now = any(BAD_SRC.search(str(s.get("title") or "")) for s in external)
-        if external and not bad_now:
-            continue                                   # 已有来源正常的外挂中文
-        if not external and args.mode == "bad":
+        # recheck/all 模式下,已挂的也要重新验一遍(上一版代码会把落选候选留在片上)
+        if external and not bad_now and args.mode not in ("recheck", "all"):
+            continue
+        if not external and args.mode in ("bad", "recheck"):
             continue
         if external and bad_now and args.mode == "missing":
             continue
@@ -216,7 +232,8 @@ def main():
                 continue
             scored.append((sc, int(s.get("score") or 0), s))
         scored.sort(key=lambda x: (-x[0], -x[1]))
-        why = "当前是枪版类字幕" if bad_now else "没有中文字幕"
+        why = ("当前是枪版类字幕" if bad_now
+               else ("复查已挂的" if external else "没有中文字幕"))
         head = "%s (%sp, %s)" % (name[:40], res, why)
         if not scored:
             log("NONE", "%s -> %d 个候选无一可用(片名对不上 %d 个,其余枪版类或无结果)"
@@ -228,37 +245,79 @@ def main():
             done += 1
             continue
 
-        ok = False
-        for sc, dl, s in scored[:4]:
+        def attach(s):
+            """挂上并等它生效,返回 stream id。"""
             q = urllib.parse.urlencode({"key": s["key"], "language": args.lang})
             st, _ = px("PUT", "/library/metadata/%s/subtitles?%s" % (rk, q))
             if st != 200:
-                log("TRY", "%s 挂载失败 HTTP %s" % (str(s.get("title"))[:50], st))
-                continue
-            sid = None
-            for _ in range(12):
-                time.sleep(5)
+                return None
+            for _ in range(10):
+                time.sleep(4)
                 st2, d2 = px("GET", "/library/metadata/%s" % rk)
                 m2 = (d2.get("Metadata") or [{}])[0]
                 for mm in m2.get("Media") or []:
                     for pp in mm.get("Part") or []:
                         for ss in pp.get("Stream") or []:
-                            if (ss.get("streamType") == 3 and ss.get("selected")
+                            if (ss.get("streamType") == 3 and ss.get("key")
                                     and str(ss.get("title") or "") == str(s.get("title") or "")):
-                                sid = ss["id"]
-                if sid:
-                    break
+                                return ss["id"]
+            return None
+
+        # 先把前几个候选各挂一次量出时间码,再由"共识"决定谁对
+        probed = []
+        for sc, dl, s in scored[:args.probe]:
+            sid = attach(s)
             if not sid:
-                log("TRY", "%s 60 秒内没生效" % str(s.get("title"))[:50])
+                log("TRY", "%s 挂载没生效" % str(s.get("title"))[:50])
                 continue
-            good, detail = check(sid, dur)
-            if good:
-                log("FIXED", "%s -> %s;%s" % (head, str(s.get("title"))[:50], detail))
-                ok = True
-                break
-            log("TRY", "%s 落选:%s" % (str(s.get("title"))[:50], detail))
-        if not ok:
-            log("NOFIX", "%s -> 试过的候选时间轴都对不上" % head)
+            m = measure(sid, dur)
+            if m is None:
+                log("TRY", "%s 落选:条目过少或末条超出片长" % str(s.get("title"))[:50])
+                px("DELETE", "/library/streams/%s" % sid)
+                continue
+            probed.append((sc, dl, s, sid, m))
+        # 找不到替代也要处理"可证伪为错"的既有字幕:末条超出片长 = 铁定不是这个剪辑版,
+        # 留着它比没有更糟(用户会以为字幕坏了却不知道为什么)。
+        for old_s in external:
+            m0 = measure(old_s["id"], dur)
+            if m0 is None:
+                st0, b0 = px("GET", "/library/streams/%s?download=1" % old_s["id"], js=False)
+                c0 = cues(b0.decode("utf-8", "replace")) if st0 == 200 else []
+                if c0 and max(c0) > dur + 5 and args.apply:
+                    px("DELETE", "/library/streams/%s" % old_s["id"])
+                    log("DROP", "%s -> 摘掉既有字幕 %s(末条 %.0fs 超出片长 %.0fs)"
+                        % (head, str(old_s.get("title"))[:40], max(c0), dur))
+        if not probed:
+            log("NOFIX", "%s -> 候选都量不出有效时间码" % head)
+            done += 1
+            continue
+
+        truth, votes = consensus([p[4] for p in probed])
+        agree = [p for p in probed if abs(p[4][2] - truth) <= 60.0]
+        # 单个候选无从比对,退回一条宽松的绝对判据:末条不得早于片长的 75%
+        if len(probed) == 1 and (dur - probed[0][4][2]) > dur * 0.25:
+            log("NOFIX", "%s -> 只有 1 个候选且末条距片尾 %.0fs,无从佐证,不挂"
+                % (head, dur - probed[0][4][2]))
+            px("DELETE", "/library/streams/%s" % probed[0][3])
+            done += 1
+            continue
+        winner = max(agree, key=lambda p: (p[0], p[1])) if agree else None
+        for p in probed:
+            if winner is None or p[3] != winner[3]:
+                px("DELETE", "/library/streams/%s" % p[3])
+        if winner is not None:
+            for old_s in external:
+                if str(old_s.get("title") or "") != str(winner[2].get("title") or ""):
+                    px("DELETE", "/library/streams/%s" % old_s["id"])
+                    log("DROP", "移除原有的 %s" % str(old_s.get("title"))[:56])
+        if winner is None:
+            log("NOFIX", "%s -> %d 个候选彼此不一致,无法确定哪个对" % (head, len(probed)))
+        else:
+            n, first, last = winner[4]
+            log("FIXED", "%s -> %s;%d 条,首 %.0fs,末 %.0fs(%d/%d 个候选一致,距片尾 %.0fs)"
+                % (head, str(winner[2].get("title"))[:46], n, first, last,
+                   votes, len(probed), dur - last))
+            attach(winner[2])
         done += 1
     if not _logged[0]:
         print("(无需变更,未写 log)")
