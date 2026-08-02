@@ -325,7 +325,8 @@ def main():
             log("FIXED", "%s -> %s;%d 条,首 %.0fs,末 %.0fs(%d/%d 个候选一致,距片尾 %.0fs)"
                 % (head, str(winner[2].get("title"))[:46], n, first, last,
                    votes, len(probed), dur - last))
-            attach(winner[2])
+            # 赢家在探测阶段就已经挂上了(winner[3] 是它的 stream id),这里**不要再挂一次** ——
+            # 重挂会生成第二条同名字幕,实测制造了 16 条重复。
         done += 1
     if not _logged[0]:
         print("(无需变更,未写 log)")

@@ -260,8 +260,12 @@ def main():
             for p in m.get("Part") or []:
                 fname = os.path.basename(p.get("file") or "") or fname
                 subs += [s for s in (p.get("Stream") or []) if s.get("streamType") == 3]
-        if [s for s in subs if is_zh(s)]:
-            continue                                   # 已有中文字幕,不动
+        # **上传上去的字幕 lang 是 None**(Plex 不给上传件打语言标记),所以只看 is_zh 会
+        # 认不出自己传的,每跑一轮就重传一份(实测把《X圣治》传成了 3 条)。
+        # 外挂且语言未知的一律当"已有",宁可漏补也不制造重复。
+        if [s for s in subs
+                if is_zh(s) or (s.get("key") and not (s.get("language") or "").strip())]:
+            continue
 
         titles = [t for t in (md.get("originalTitle"), md.get("title"),
                               md.get("grandparentTitle"), clean_title(fname)) if t]
