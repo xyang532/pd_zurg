@@ -282,7 +282,9 @@ def main():
             for s in assrt_search(q.strip()):
                 sid = s.get("id")
                 vn = str(s.get("videoname") or s.get("native_name") or "")
-                if sid in seen_ids or not same_film(vn, titles) or BAD_SRC.search(vn):
+                # 条目名常常是垃圾(实测有个条目就叫 "BluRay",里面却装着 79 个正确命名的文件),
+                # 所以条目名**不作否决依据** —— 真正的身份在文件名上,逐个文件再验。
+                if sid in seen_ids or BAD_SRC.search(vn):
                     continue
                 seen_ids.add(sid)
                 cands.append((lang_rank((s.get("lang") or {}).get("desc"), vn), vn, sid))
@@ -293,34 +295,46 @@ def main():
             done += 1
             continue
 
-        probed = []
+        probed, why_fail = [], {}
         for rank, vn, sid in cands[:args.probe]:
 
-            for fn, url in assrt_files(sid)[:2]:
-                # 合集条目(如"哈利波特1-8部合集")的条目名能过闸,但文件列表里装着 8 部电影的
-                # 字幕 —— 必须**逐个文件**再验一次片名,否则会挑到同系列的另一部(实测踩到)
+            # **先筛后截断**。原来先取前 2 个文件再筛集号,而 13 集的包里 S03E11 是第 11 个,
+            # 永远轮不到 —— 76 个 NONE 里很大一部分是这么来的。
+            files = []
+            for fn, url in assrt_files(sid):
+                if ep and not re.search(r"(?<![0-9])S0*%dE0*%d(?![0-9])" % ep, fn, re.I):
+                    continue
+                # 合集条目(如"哈利波特1-8部合集")里装着多部电影的字幕,逐个文件验片名
                 if not same_film(fn, titles):
                     continue
-                if ep and not re.search(r"(?<![0-9])S0*%dE0*%d(?![0-9])" % ep, fn, re.I):
-                    continue          # 整季包里要挑出**这一集**,不能随便拿一个
+                files.append((fn, url))
+            for fn, url in files[:2]:
                 st2, raw = web(url)
                 if st2 == 402:
                     log("RATE", "撞到 assrt 速率上限,等 30 秒再继续")
                     time.sleep(30)
                     st2, raw = web(url)
                 if st2 != 200 or not raw:
+                    why_fail["下载失败"] = why_fail.get("下载失败", 0) + 1
                     continue
                 txt, enc = decode(raw)
                 if not txt:
+                    why_fail["解码失败"] = why_fail.get("解码失败", 0) + 1
                     continue
                 c = cue_times(txt)
-                if len(c) < MIN_CUES or c[-1] > dur + 5:
+                if len(c) < MIN_CUES:
+                    why_fail["条目过少"] = why_fail.get("条目过少", 0) + 1
+                    continue
+                if c[-1] > dur + 5:
+                    why_fail["末条超片长"] = why_fail.get("末条超片长", 0) + 1
                     continue
                 probed.append({"rank": max(rank, lang_rank("", fn)), "name": fn, "vn": vn,
                                "n": len(c), "first": c[0], "last": c[-1],
                                "text": txt, "enc": enc})
         if not probed:
-            log("NONE", "%s -> %d 个候选都下不到或时间码不合格" % (head, len(cands)))
+            log("NONE", "%s -> %d 个条目里没有可用文件(%s)"
+                % (head, len(cands),
+                   "、".join("%s×%d" % kv for kv in sorted(why_fail.items())) or "无匹配文件"))
             done += 1
             continue
 
