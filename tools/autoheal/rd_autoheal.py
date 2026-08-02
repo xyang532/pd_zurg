@@ -42,6 +42,8 @@ ap.add_argument("--recheck-days", type=float, default=0.0,
                      "设成 7 能把日常调用量砍到 1/7,代价是新死的档最长 7 天才发现")
 ap.add_argument("--limit", type=int, default=3, help="单次最多替换几个,防跑飞")
 ap.add_argument("--tries", type=int, default=8, help="每个死档最多试几个候选")
+ap.add_argument("--degraded-days", type=float, default=3.0,
+                help="一个文件连续 503 多少天就先补个替代(旧的不删,原件恢复后自动撤掉替代)")
 ap.add_argument("--only", default="", help="只处理文件名含该子串的死档(调试用)")
 ap.add_argument("--scan-only", action="store_true", help="只扫描不找替代")
 ap.add_argument("--sample", type=int, default=0, help="只扫前 N 个种子(自测用)")
@@ -195,10 +197,15 @@ def unrestrict_code(link):
     return 429, "rate_limited"
 
 
+def _fname_lazy(t, i):
+    _, info = rd("/torrents/info/" + t["id"])
+    return _fname(info, i)
+
+
 def scan(tors, state):
-    """返回 [(torrent, dead_index_list, live_count)];顺带把状态变化写进 log。"""
+    """返回 (死档清单, 长期 503 清单, 已恢复清单);顺带把状态变化写进 log。"""
     links_state = state.setdefault("links", {})
-    found = []
+    found, degraded, restores = [], [], []
     now = time.time()
     skipped = probed = 0
     unknown = {}
@@ -216,22 +223,41 @@ def scan(tors, state):
                 continue
             code, err = unrestrict_code(ln)
             probed += 1
+            permanent = False
             if code == 451:
+                # 451 = DMCA 永久下架,**唯一确定回不来的故障**,所以只有它允许删旧片源。
                 health, strikes = "dead", CONFIRM_RUNS
+                permanent = True
             elif code == 200:
-                health, strikes = "ok", 0
+                health, strikes, permanent = "ok", 0, False
+                if prev.get("unavail_since") or prev.get("health") in ("dead", "suspect"):
+                    # 原件自己好了。若当初补过替代,这轮要在两者之间**按质量**留一个。
+                    restores.append((key, t, i))
             elif code == 429 or code == 0 or code >= 500:
                 # 限流 / 网络错 / 服务端故障 = **没测到**,不是"文件坏了"。
                 # 这里绝不能记 strike —— 否则连续两轮异常就会把健康文件判死并触发替换。
                 # 但三者必须**分档记**:混成一档会把"hoster 挂了"读成"被限流",调速率是白调。
                 kind = "限流429" if code == 429 else ("网络错" if code == 0 else "hoster不可用%d" % code)
                 unknown[kind] = unknown.get(kind, 0) + 1
-                links_state[key] = dict(prev, last_unknown=int(now), code=code, why=kind)
+                rec = dict(prev, last_unknown=int(now), code=code, why=kind)
+                # 503 是 RD 那边存这个文件的机器不可用 —— 可能几小时就好,也可能一直不好。
+                # 所以既不能当死档删,也不能一直干等:连续 N 天不好就**先补一份能用的**,
+                # 原件恢复后再把补的撤掉(见 main 里的 RESTORE)。
+                if code >= 500:
+                    rec.setdefault("unavail_since", int(now))
+                    age = now - float(rec["unavail_since"])
+                    if age >= args.degraded_days * 86400:
+                        degraded.append((t, i, age))
+                else:
+                    rec.pop("unavail_since", None)
+                links_state[key] = rec
                 continue
             else:
-                # 404 之类:文件确实取不到,但可能是 zurg 尚未修复 —— 要连续看到才算数
+                # 404 之类:文件确实取不到,但可能是 zurg 尚未修复 —— 要连续看到才算数。
+                # 注意它是**可恢复**的:补了新片源也不删旧的,等它自己回来再比质量。
                 strikes = int(prev.get("strikes", 0)) + 1
                 health = "dead" if strikes >= CONFIRM_RUNS else "suspect"
+                permanent = False
             # 首次见到且健康 —— 那是建基线,不是状态变化,不写 log(否则首轮会刷几百行)
             first_and_fine = (not prev) and health == "ok"
             if prev.get("health") != health and not first_and_fine:
@@ -240,7 +266,8 @@ def scan(tors, state):
                 fn = _fname(info, i)
                 log("CHANGE", "%s -> %s  HTTP %s %s  | %s"
                     % (fn[:70], health, code, err, t.get("filename", "")[:50]))
-            links_state[key] = {"health": health, "strikes": strikes, "code": code, "ts": now}
+            links_state[key] = {"health": health, "strikes": strikes, "code": code,
+                                "ts": now, "permanent": permanent}
             if health == "dead":
                 dead.append(i)
             # 全扫要十几分钟,中途被打断(容器重启)不该把整轮进度丢掉
@@ -260,7 +287,7 @@ def scan(tors, state):
     if tot_unknown:
         log("UNKNOWN", "%d 条链接未能判定(%s);不计入健康判据,留待下轮"
             % (tot_unknown, ", ".join("%s×%d" % kv for kv in sorted(unknown.items()))))
-    return found
+    return found, degraded, restores
 
 
 def _fname(info, i):
@@ -320,6 +347,39 @@ def candidates(meta):
     return out
 
 
+def quality(title, size_bytes):
+    """给"两个都能播的片源"排座次:分辨率 > 片源等级 > 体积。
+
+    用途只有一个 —— 原件从故障里恢复后,跟当初临时补的那份比一比,**留好的那个**。
+    这样"要不要换回去"不用事先拍板,数据自己决定;平手时调用方保留原件(稳定优先)。
+    """
+    t = str(title)
+    m = re.search(r"(2160|1080|720|480)(?=[pi])", t, re.I)
+    res = int(m.group()) if m else 0
+    if re.search(r"REMUX", t, re.I):
+        tier = 3
+    elif re.search(r"(?<![A-Za-z0-9])(BluRay|Blu-Ray|BDRemux|BDRip)(?![A-Za-z0-9])", t, re.I):
+        tier = 2
+    elif re.search(r"(?<![A-Za-z0-9])(WEB-?DL|WEBRip|AMZN|NF|HULU)(?![A-Za-z0-9])", t, re.I):
+        tier = 1
+    else:
+        tier = 0
+    return (res, tier, int(size_bytes or 0))
+
+
+CLEAR_WIN_RATIO = 1.15    # 同分辨率同片源等级时,体积要大这么多才算"明显更好"
+
+
+def clearly_better(new_q, old_q):
+    """新的是否**明显**优于旧的。同分辨率同等级下体积差几个百分点不算 ——
+    "坏了才换,否则稳定优先",不为 3% 的体积差制造一份重复。"""
+    if new_q[0] != old_q[0]:
+        return new_q[0] > old_q[0]
+    if new_q[1] != old_q[1]:
+        return new_q[1] > old_q[1]
+    return new_q[2] >= old_q[2] * CLEAR_WIN_RATIO
+
+
 def _title_res(rel):
     """plex_debrid 的 resolution 正则要求带 p,`1080i` 会被解析成 0 从而绕过分辨率闸。
     隔行片源(老剧的 BluRay MPEG-2 母版)是真 1080,不能当未知放过 —— 这里补 i。"""
@@ -333,12 +393,21 @@ def _title_res(rel):
     return int(m.group()) if m else 0
 
 
-def try_replace(meta, rel, need_bytes, want_ep):
-    """加新的 -> 找到目标文件 -> 体积闸 -> unrestrict 实测。失败就撤销,返回 None。"""
+def try_replace(meta, rel, need_bytes, want_ep, old_id=None, old_hash=None):
+    """加新的 -> 找到目标文件 -> 体积闸 -> unrestrict 实测。失败就撤销,返回 None。
+
+    old_id/old_hash 是防自伤的:候选里常混着**现有种子本身**(同一个发布)。RD 对同 hash
+    的 addMagnet 会直接返回已存在的那个 id,若不拦住,后面"撤除替代"就会把原件删掉。
+    """
+    if old_hash and rel.hash and rel.hash.lower() == old_hash.lower():
+        return None, "与现有片源同一个 hash,跳过"
     st, res = rd("/torrents/addMagnet", {"magnet": "magnet:?xt=urn:btih:" + rel.hash})
     nid = res.get("id") if isinstance(res, dict) else None
     if not nid:
         return None, "addMagnet HTTP %s" % st
+    if old_id and nid == old_id:
+        # RD 认出是同一个种子,直接返回了原件的 id —— 绝不能 delete,原样退出
+        return None, "RD 返回的就是现有种子本身,跳过"
 
     def bail(reason):
         rd("/torrents/delete/" + nid, method="DELETE")
@@ -357,9 +426,10 @@ def try_replace(meta, rel, need_bytes, want_ep):
     else:
         sel = [f for f in files if (f.get("bytes") or 0) > 100_000_000] or files
     target = max(sel, key=lambda f: f.get("bytes") or 0)
-    if (target.get("bytes") or 0) < need_bytes * MIN_SIZE_RATIO:
+    tb = target.get("bytes") or 0
+    if tb < need_bytes * MIN_SIZE_RATIO:
         return bail("体积 %.2fGB < 原件 %.2fGB 的 %d%%"
-                    % ((target.get("bytes") or 0) / 1e9, need_bytes / 1e9, MIN_SIZE_RATIO * 100))
+                    % (tb / 1e9, need_bytes / 1e9, MIN_SIZE_RATIO * 100))
     rd("/torrents/selectFiles/" + nid, {"files": ",".join(str(f["id"]) for f in sel)})
 
     ok = False
@@ -385,7 +455,7 @@ def try_replace(meta, rel, need_bytes, want_ep):
     code, err = unrestrict_code(links[pos])
     if code != 200:
         return bail("新片源 unrestrict HTTP %s %s" % (code, err))
-    return nid, "%.2fGB" % ((target.get("bytes") or 0) / 1e9)
+    return nid, ("%.2fGB" % (tb / 1e9), tb)
 
 
 # ---------------------------------------------------------------- 主流程
@@ -398,59 +468,130 @@ def main():
     print("扫描 %d 个种子 / %d 条链接(节流 %.1f 次/秒,约 %.1f 分钟)"
           % (len(tors), total_links, args.rate, total_links / args.rate / 60))
 
-    bad = scan(tors, state)
+    bad, degraded, restores = scan(tors, state)
     save_state(state)
-    print("发现有死档的种子: %d 个" % len(bad))
-    if args.scan_only or not bad:
+    print("死档种子 %d 个,长期 503 的文件 %d 个,已恢复 %d 个"
+          % (len(bad), len(degraded), len(restores)))
+
+    temps = state.setdefault("temp", {})
+
+    # ① 原件自己好了 —— 和当初补的那份**比质量**,留好的一个,而不是无脑换回去
+    for key, t, i in restores:
+        st = state["links"].get(key, {})
+        st.pop("unavail_since", None)
+        tmp = temps.get(key)
+        _, info = rd("/torrents/info/" + t["id"])
+        fn = _fname(info, i)
+        if not tmp:
+            log("RECOVER", "%s 已自行恢复(当初没补过替代)" % fn[:66])
+            continue
+        files = [f for f in (info.get("files") or []) if f.get("selected")]
+        old_q = quality(fn, files[i].get("bytes") if i < len(files) else 0)
+        new_q = tuple(tmp.get("q") or (0, 0, 0))
+        keep_old = not clearly_better(new_q, old_q)   # 替代要**明显**更好才留它,否则回到原件
+        loser = tmp["id"] if keep_old else None
+        verdict = ("原件不差于替代" if keep_old else "替代明显更好")
+        if not args.apply:
+            log("PLAN", "%s 已恢复;%s -> %s"
+                % (fn[:44], verdict, "撤掉替代" if keep_old else "保留替代,原件待你决定"))
+            continue
+        if loser:
+            rd("/torrents/delete/" + loser, method="DELETE")
+            temps.pop(key, None)
+            log("RESTORE", "%s 已恢复,%s,临时替代 %s 已撤除"
+                % (fn[:40], verdict, tmp.get("title", "")[:36]))
+        else:
+            # 替代反而更好。但原件所在的种子可能还带着别的能播的文件,不能替你删 —— 留给你定。
+            temps.pop(key, None)
+            log("KEEPNEW", "%s 已恢复,但替代 %s 质量更高,两份都留着,要删哪个你定"
+                % (fn[:40], tmp.get("title", "")[:36]))
+
+    if args.scan_only or (not bad and not degraded):
+        save_state(state)
         if not _logged[0]:
             print("(无状态变化,未写 log)")
         return
 
     idx = plex_index()
     done = 0
+
+    def handle(t, info, i, live, temp_key=None, note=""):
+        """temp_key 非空 = 长期 503 的临时替代:旧种一律不删,记进 temp 待原件恢复后撤除。"""
+        files = [f for f in (info.get("files") or []) if f.get("selected")]
+        fn = os.path.basename(files[i].get("path", "")) if i < len(files) else ""
+        if args.only and args.only.lower() not in fn.lower():
+            return 0
+        meta = idx.get(fn)
+        if not meta or not meta.get("imdb"):
+            log("MISS", "Plex 里查不到 %s(无法定位 imdb),跳过" % fn[:70])
+            return 0
+        need = meta["size"] or (files[i].get("bytes") or 0)
+        want_ep = (meta["s"], meta["e"]) if meta["kind"] == "episode" else None
+        cands = candidates(meta)
+        head = "%s%s %s %.2fGB %sp" % (note, meta["imdb"], fn[:48], need / 1e9, meta["res"])
+        if not cands:
+            log("NOFIX", "%s —— 三源合计 0 个合格候选" % head)
+            return 0
+        if not args.apply:
+            log("PLAN", "%s -> 候选 %d 个,首选 %s (%.2fGB, %s)"
+                % (head, len(cands), cands[0].title[:56], cands[0].size, cands[0].source))
+            return 0
+        picked = None
+        for rel in cands[:args.tries]:
+            nid, why = try_replace(meta, rel, need, want_ep,
+                                   old_id=t.get("id"), old_hash=t.get("hash"))
+            if nid:
+                picked = (nid, rel, why[0], why[1])
+                break
+            log("TRY", "%s 落选:%s" % (rel.title[:56], why))
+        if not picked:
+            log("NOFIX", "%s —— 试过的 %d 个候选都没成" % (head, min(len(cands), args.tries)))
+            return 0
+        nid, rel, size_gb, size_b = picked
+        if temp_key:
+            # 可恢复的故障:旧的一律不删。记下替代的质量,等原件回来时比一比留谁。
+            temps[temp_key] = {"id": nid, "title": rel.title[:80], "since": int(time.time()),
+                               "q": list(quality(rel.title, size_b))}
+            log("PATCH", "%s -> 补 %s (%s, %s);故障可能自愈,旧片源保留待比对"
+                % (head, rel.title[:56], size_gb, rel.source))
+        elif live == 0:
+            rd("/torrents/delete/" + t["id"], method="DELETE")
+            log("HEAL", "%s -> %s (%s, %s);旧种整个永久失效(451),已删"
+                % (head, rel.title[:56], size_gb, rel.source))
+        else:
+            log("HEAL", "%s -> %s (%s, %s);旧种还有 %d 条活链接,保留"
+                % (head, rel.title[:56], size_gb, rel.source, live))
+        return 1
+
+    # ② 已判死的:一律先补能用的。**只有整个种子全是 451(永久)才删旧** ——
+    #    别的故障都可能自愈,删了就回不去,所以留着等它恢复后比质量(见 ①)。
     for t, info, dead, live in bad:
+        all_perm = all(state["links"].get("%s#%d" % (t["id"], i), {}).get("permanent")
+                       for i in dead)
+        for i in dead:
+            if done >= args.limit:
+                log("SKIP", "已达单次上限 %d,剩余留待下轮" % args.limit)
+                break
+            key = "%s#%d" % (t["id"], i)
+            if key in temps:
+                continue                  # 已经补过了
+            perm = state["links"].get(key, {}).get("permanent")
+            done += handle(t, info, i, live,
+                           temp_key=None if (perm and all_perm) else key,
+                           note="" if perm else "[可恢复故障] ")
+
+    # ③ 长期 5xx:先补一份能用的,旧的留着等它自己好
+    for t, i, age in degraded:
         if done >= args.limit:
             log("SKIP", "已达单次上限 %d,剩余留待下轮" % args.limit)
             break
-        files = [f for f in (info.get("files") or []) if f.get("selected")]
-        for i in dead:
-            fn = os.path.basename(files[i].get("path", "")) if i < len(files) else ""
-            if args.only and args.only.lower() not in fn.lower():
-                continue
-            meta = idx.get(fn)
-            if not meta or not meta.get("imdb"):
-                log("MISS", "Plex 里查不到 %s(无法定位 imdb),跳过" % fn[:70])
-                continue
-            need = meta["size"] or (files[i].get("bytes") or 0)
-            want_ep = (meta["s"], meta["e"]) if meta["kind"] == "episode" else None
-            cands = candidates(meta)
-            head = "%s %s %.2fGB %sp" % (meta["imdb"], fn[:52], need / 1e9, meta["res"])
-            if not cands:
-                log("NOFIX", "%s —— 三源合计 0 个合格候选" % head)
-                continue
-            if not args.apply:
-                log("PLAN", "%s -> 候选 %d 个,首选 %s (%.2fGB, %s)"
-                    % (head, len(cands), cands[0].title[:56], cands[0].size, cands[0].source))
-                continue
-            picked = None
-            for rel in cands[:args.tries]:
-                nid, why = try_replace(meta, rel, need, want_ep)
-                if nid:
-                    picked = (nid, rel, why)
-                    break
-                log("TRY", "%s 落选:%s" % (rel.title[:56], why))
-            if not picked:
-                log("NOFIX", "%s —— 试过的 %d 个候选都没成" % (head, min(len(cands), args.tries)))
-                continue
-            nid, rel, size_s = picked
-            if live == 0:
-                rd("/torrents/delete/" + t["id"], method="DELETE")
-                log("HEAL", "%s -> %s (%s, %s);旧种全死已删"
-                    % (head, rel.title[:56], size_s, rel.source))
-            else:
-                log("HEAL", "%s -> %s (%s, %s);旧种还有 %d 条活链接,保留"
-                    % (head, rel.title[:56], size_s, rel.source, live))
-            done += 1
+        key = "%s#%d" % (t["id"], i)
+        if key in temps:
+            continue                      # 已经补过了
+        _, info = rd("/torrents/info/" + t["id"])
+        done += handle(t, info, i, live=1, temp_key=key,
+                       note="[hoster 不可用已 %.1f 天] " % (age / 86400.0))
+
     save_state(state)
     if not _logged[0]:
         print("(无状态变化,未写 log)")
