@@ -31,6 +31,8 @@ ap.add_argument("--apply", action="store_true", help="真的改(默认干跑)")
 ap.add_argument("--lang", default="zh", help="字幕语言代码")
 ap.add_argument("--limit", type=int, default=5, help="单次最多处理几部")
 ap.add_argument("--only", default="", help="只处理片名含该子串的")
+# 事件触发时只处理刚入库的那一个条目 —— 中文片名经 ssh/locale 传不可靠,按 ratingKey 指
+ap.add_argument("--rk", default="", help="只处理这些 ratingKey(逗号分隔)")
 ap.add_argument("--mode", default="bad", choices=["bad", "missing", "recheck", "all"],
                 help="bad=只修枪版类;missing=只补缺的;recheck=复查已挂的;all=全做")
 ap.add_argument("--probe", type=int, default=4, help="每部片实测几个候选来取共识")
@@ -193,7 +195,10 @@ def items():
 
 def main():
     done = 0
+    keep = set(x for x in args.rk.split(",") if x)
     for rk in items():
+        if keep and str(rk) not in keep:
+            continue
         if done >= args.limit:
             log("SKIP", "已达单次上限 %d,其余留待下次" % args.limit)
             break

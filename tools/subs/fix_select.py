@@ -2,6 +2,11 @@
 """去重可能删掉了当时被选中的那条,导致有字幕却不显示。把未选中的补选上。默认干跑。"""
 import json, io, os, sys, urllib.request, urllib.error
 APPLY = "--apply" in sys.argv
+# 事件触发时只补选刚入库的那个条目(不传就是全库扫一遍,代价只有 API 往返)
+RK = set()
+for i, a in enumerate(sys.argv):
+    if a == "--rk" and i + 1 < len(sys.argv):
+        RK = set(x for x in sys.argv[i + 1].split(",") if x)
 cfg = json.load(io.open("/config/settings.json", encoding="utf-8"))
 BASE = cfg["Plex server address"]; TOK = os.environ.get("PLEX_TOKEN") or cfg["Plex users"][0][1]
 
@@ -27,6 +32,8 @@ n = 0
 for sec in ("1", "2"):
     q = "/library/sections/%s/all%s" % (sec, "?type=4" if sec == "2" else "")
     for it in (px("GET", q)[1].get("Metadata") or []):
+        if RK and str(it["ratingKey"]) not in RK:
+            continue
         md = (px("GET", "/library/metadata/%s" % it["ratingKey"])[1].get("Metadata") or [{}])[0]
         for m in md.get("Media") or []:
             for p in m.get("Part") or []:

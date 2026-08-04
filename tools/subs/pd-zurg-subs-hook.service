@@ -1,0 +1,16 @@
+[Unit]
+Description=pd_zurg subtitle webhook listener (Plex library.new -> fetch + align subtitles)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /volume1/docker/pd_zurg/pd_zurg/tools/subs/subs_hook.py
+Restart=always
+RestartSec=5
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

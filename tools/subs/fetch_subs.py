@@ -33,6 +33,8 @@ BAD_SRC = re.compile(r"(?<![A-Za-z0-9])(TELESYNC|TS|CAM|HDCAM|HDTS|SCREENER|SCR|
 ap = argparse.ArgumentParser()
 ap.add_argument("--apply", action="store_true")
 ap.add_argument("--only", default="")
+# 事件触发时只处理刚入库的那一个条目 —— 中文片名经 ssh/locale 传不可靠,按 ratingKey 指
+ap.add_argument("--rk", default="", help="只处理这些 ratingKey(逗号分隔)")
 ap.add_argument("--limit", type=int, default=5)
 ap.add_argument("--probe", type=int, default=2,
                 help="每部片下载几个候选。**下载是稀缺资源**(assrt 免费额度很小),别调大")
@@ -240,7 +242,10 @@ def main():
     done = 0
     print("assrt 本分钟剩余请求数: %s(限额 20 次/分钟,已按 3.2 秒/次节流)"
           % (assrt_quota() if True else "?"))
+    keep = set(x for x in args.rk.split(",") if x)
     for rk in items():
+        if keep and str(rk) not in keep:
+            continue
         if done >= args.limit:
             log("SKIP", "已达单次上限 %d" % args.limit)
             break
