@@ -15,6 +15,7 @@ ratingKey,判定要片长和片源自带字幕轨,这些都得等 Plex 扫完才
 第三步在宿主机上跑(要宿主机的 ffmpeg 和挂载盘)。
 """
 import io, json, os, re, subprocess, sys, threading, time
+from email.parser import BytesParser
 import urllib.request, urllib.parse, urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -181,12 +182,29 @@ def worker():
             _q.task_done()
 
 
-PAYLOAD_RE = re.compile(rb'name="payload"\r?\n\r?\n(.*?)\r?\n--', re.S)
+# Plex 真发的 payload 分段里多一行 `Content-Type: application/json` —— 手写的测试载荷没有,
+# 于是"单测通过、生产解不开"。所以优先按 Content-Type 里的真实 boundary 走标准 multipart
+# 解析;正则只当没有 Content-Type 时的兜底,且必须容忍分段里出现任意条额外的头。
+PAYLOAD_RE = re.compile(
+    rb'name="payload"[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n(.*?)\r?\n--', re.S)
 
 
 def parse_payload(body, ctype):
-    if "application/json" in (ctype or ""):
+    ctype = ctype or ""
+    if "application/json" in ctype:
         return json.loads(body.decode("utf-8", "replace"))
+    if "multipart/" in ctype:
+        try:
+            msg = BytesParser().parsebytes(
+                b"Content-Type: " + ctype.encode("utf-8", "replace")
+                + b"\r\nMIME-Version: 1.0\r\n\r\n" + body)
+            for part in msg.walk():
+                if part.get_param("name", header="content-disposition") == "payload":
+                    raw = part.get_payload(decode=True)
+                    if raw:
+                        return json.loads(raw.decode("utf-8", "replace"))
+        except Exception:
+            pass
     m = PAYLOAD_RE.search(body)
     if not m:
         return None
@@ -211,13 +229,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             p = parse_payload(body, self.headers.get("Content-Type"))
-        except Exception:
-            p = None
-        if not p or p.get("event") != "library.new":
+        except Exception as e:
+            log("WARN", "事件解不开(%d 字节): %s" % (len(body), e))
+            return
+        if not p:
+            try:
+                io.open("/volume1/docker/pd_zurg/log/bad_webhook.bin", "wb").write(body)
+            except IOError:
+                pass
+            log("WARN", "事件里找不到 payload 字段(%d 字节),原始体已存 log/bad_webhook.bin" % len(body))
             return
         md = p.get("Metadata") or {}
+        ev = p.get("event")
+        if ev != "library.new":
+            # 记一行:这是"Plex 确实在往这里投递"的唯一可观测证据,否则静默不知死活
+            log("EVENT", "收到 %s(%s),不是入库事件,忽略" % (ev, (md.get("title") or "-")[:40]))
+            return
         rk = md.get("ratingKey")
         if not rk:
+            log("WARN", "library.new 事件里没有 ratingKey,忽略")
             return
         for one in expand(rk, md.get("type")):
             _q.put(str(one))
