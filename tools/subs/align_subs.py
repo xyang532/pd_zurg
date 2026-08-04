@@ -484,14 +484,21 @@ def main():
                         t1, (d1, _, _) = firm[0]
                         t2, (d2, _, _) = firm[-1]
                         a, b_ = fit_drift(t1, d1, t2, d2)
-                    else:
-                        # 没有两个够硬的窗口:只测偏移,不测斜率。多个窗口取**中位数** ——
-                        # 它们是同一个量的独立测量,中位数能吃掉其中一个量虚了的窗口。
-                        vals = sorted(m[1][0] for m in measured)
-                        d1 = d2 = vals[len(vals) // 2]
+                    elif firm:
+                        # 只有一个够硬的窗口:就用它。**别去跟虚窗口取中位数** —— 两个值的
+                        # "中位数"实际就是随便挑一个,实测《一级恐惧》因此采用了 11 票那条
+                        # (-0.724)而不是 48 票那条(-1.091),改完还剩 0.367 秒没归零。
+                        d1 = d2 = firm[0][1][0]
                         a, b_ = 1.0, d1
-                        detail += ";不足两个可信窗口,只按整体平移处理(带*的未达门槛)"
-                        if not firm and abs(d1) < MIN_WEAK_SHIFT:
+                        detail += ";只有一个可信窗口,按整体平移处理(带*的未参与)"
+                    else:
+                        # 一个够硬的都没有:多个窗口取中位数,让它吃掉其中量得最虚的那个
+                        vals = sorted(m[1][0] for m in measured)
+                        n = len(vals)
+                        d1 = d2 = (vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2.0)
+                        a, b_ = 1.0, d1
+                        detail += ";没有可信窗口,取各窗口中位数"
+                        if abs(d1) < MIN_WEAK_SHIFT:
                             log("UNSURE", "%s -> 没有可信窗口且偏移只有 %+.3fs,不值得冒险改;%s"
                                 % (head, d1, detail))
                             state[key] = {"result": "unsure", "d": round(d1, 3)}
