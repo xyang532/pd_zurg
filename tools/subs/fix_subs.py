@@ -69,7 +69,13 @@ def px(method, path, js=True, timeout=180):
 
 def is_zh(s):
     t = "%s%s%s" % (s.get("language") or "", s.get("languageTag") or "", s.get("languageCode") or "")
-    return ("中文" in t) or ("zh" in t.lower()) or ("chi" in t.lower())
+    if ("中文" in t) or ("zh" in t.lower()) or ("chi" in t.lower()):
+        return True
+    # **上传上去的字幕 Plex 不打语言标记**(lang=None)。只看 language 的话,自己传的、
+    # align_subs 对齐后回传的、用户手工传的,统统会被当成"这片子没有中文字幕",于是每晚
+    # 都去重挂一轮候选、挂完再删,把已经配好的条目搅成未选中状态(实测撞到《火焰杯》)。
+    # 外挂且语言未知的一律当中文 —— fetch_subs / survey_subs / fix_select 用的是同一条规则。
+    return bool(s.get("key")) and not t.strip()
 
 
 def cues(text):
