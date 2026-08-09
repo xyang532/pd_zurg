@@ -51,6 +51,9 @@ RATE_DEBOUNCE = 600.0
 
 _q = queue.Queue()
 _cfg = [None]
+# 当前正在处理的条目,空闲时 None。队列深度取不到"在飞的那一个",所以必须单独记 ——
+# 否则报出来的排队数会少一个,而"按了没反应"正是靠这个数字解释的。
+_busy = [None]
 
 
 def docker_cmd():
@@ -128,6 +131,24 @@ def hook_secret():
         return s
 
 
+def enqueue(rks, recheck, force, why, title):
+    """入队并报一行 —— 用户按下之后唯一能看到的反馈就是这行。"""
+    for one in rks:
+        # webhook 里本来就带片名,带进队列 —— 否则 handle() 查到名字之前,
+        # "正在处理 …" 只能报 rk,而这行是给人看的
+        _q.put((str(one), recheck, force, why, title))
+    busy = _busy[0]
+    # 竞态下 worker 可能刚取走一个,所以这个数字只当提示,措辞上不许说得太确定
+    ahead = max(0, _q.qsize() - len(rks))
+    if busy:
+        log("QUEUE", "%s 已排队 —— 正在处理 %s,前面还有约 %d 个。队列是串行的:"
+                     "对轴要读盘(每部约 1 分钟),并行只会互相拖慢" % (title, busy, ahead))
+    elif ahead:
+        log("QUEUE", "%s 已排队,前面还有约 %d 个" % (title, ahead))
+    else:
+        log("QUEUE", "%s 已排队,马上开始" % title)
+
+
 def expand(rk, typ):
     """剧集的事件可能报在剧/季上,展开成单集 —— 字幕是按集配的。"""
     if typ == "show":
@@ -182,6 +203,7 @@ def handle(rk, recheck=False, why="入库"):
     if md.get("grandparentTitle"):
         name = "%s S%02dE%02d" % (md["grandparentTitle"],
                                   md.get("parentIndex") or 0, md.get("index") or 0)
+    _busy[0] = "%s (rk=%s)" % (name[:40], rk)
     log("NEW", "%s %s (rk=%s) —— 开始配字幕%s"
         % (why, name[:40], rk, "(强制重量)" if recheck else ""))
     in_container("fix_subs.py", rk, ["--mode", "missing"])
@@ -200,7 +222,7 @@ def worker():
     sset = set(seen)
     last = {}
     while True:
-        rk, recheck, force, why = _q.get()
+        rk, recheck, force, why, label = _q.get()
         try:
             now = time.time()
             if force:
@@ -217,10 +239,13 @@ def worker():
                 seen.append(rk)
                 save_seen(seen)
             last[rk] = now
+            # handle() 查到精确片名(剧集会细到单集)后会覆盖这里
+            _busy[0] = ("%s (rk=%s)" % (label[:40], rk)) if label else ("rk=%s" % rk)
             handle(rk, recheck=recheck, why=why)
         except Exception as e:
             log("WARN", "rk=%s 处理时异常: %s" % (rk, e))
         finally:
+            _busy[0] = None
             _q.task_done()
 
 
@@ -296,8 +321,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 log("EVENT", "收到 media.rate(%s) rating=%s —— 当作手动触发,开始查字幕"
                     % (title, rating))
-                for one in expand(rk, md.get("type")):
-                    _q.put((str(one), True, True, "手动(Plex 打分)"))
+                enqueue(expand(rk, md.get("type")), True, True, "手动(Plex 打分)", title)
             return
         if ev != "library.new":
             # 记一行:这是"Plex 确实在往这里投递"的唯一可观测证据,否则静默不知死活
@@ -307,15 +331,18 @@ class Handler(BaseHTTPRequestHandler):
         if not rk:
             log("WARN", "library.new 事件里没有 ratingKey,忽略")
             return
-        for one in expand(rk, md.get("type")):
-            _q.put((str(one), False, False, "入库"))
+        enqueue(expand(rk, md.get("type")), False, False, "入库", title)
 
     def do_GET(self):
-        # 给"这个监听器还活着吗"一个能打的地址(不带密钥也答,但只说活着)
+        # 不带密钥也答 —— 只报"活着 / 在忙什么 / 排了几个",不泄露任何片库内容以外的东西。
+        # 浏览器直接打开就能看,省得为了"到底有没有在动"去 ssh 翻日志。
         self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"subs_hook alive\n")
+        busy = _busy[0]
+        body = ("subs_hook alive\n正在处理: %s\n排队中: %d 个\n"
+                % (busy if busy else "(空闲)", _q.qsize()))
+        self.wfile.write(body.encode("utf-8"))
 
 
 def main():
