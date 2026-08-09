@@ -9,6 +9,13 @@
 ratingKey,判定要片长和片源自带字幕轨,这些都得等 Plex 扫完才有。所以挂在这个事件上,
 就是物理上最早的可行点。
 
+**老片怎么手动触发**(两个入口,都走下面同一个 handle(),不另写一份实现):
+  · 在 Plex 里给那部片**打个分** —— `media.rate` 事件也会送到这里,视作"帮我修一下这部片的
+    字幕"。评分本身不动(不是哨兵值,也不会被清掉),纯当一个手势。取消评分(rating=-1)
+    不触发,否则"打分→取消"会连发两次。默认开,`subs_hook.json` 里 `rate_trigger: false` 可关。
+  · 或在 NAS 上跑 `subs_one.py <片名>` —— 同样四步,范围限定到匹配上的条目。
+  手动触发一律带 `--recheck`:老片在 align_state.json 里已记"量过了",不强制就直接跳过。
+
 四步,和手动那套完全一样,只是每一步都用 --rk 限定到这一个条目:
   fix_subs(Plex 源,不耗外部配额)→ fetch_subs(assrt)→ align_subs(对轴)→ fix_select(补选中)
 前两步和第四步在容器里跑(要 /config 和 docker 网络里的 `plex` 主机名),
@@ -38,9 +45,17 @@ PORT = 32499
 READY_TRIES, READY_WAIT = 40, 30.0
 # 同一个条目短时间内可能收到多次事件(季/剧集/单集各来一发),记下做过的,别重复干
 SEEN_KEEP = 4000
+# 手动触发不受 seen 拦(那正是它的用途),但同一条目连发要防抖:在 Plex 里打分,
+# 客户端有时会先发一次再纠正一次;而这四步跑一遍要几十秒到一分半,重入没有意义。
+RATE_DEBOUNCE = 600.0
 
 _q = queue.Queue()
 _cfg = [None]
+
+
+def docker_cmd():
+    """服务以 root 跑;subs_one.py 可能被普通用户跑 —— 非 root 时走 sudo(docker 已配 nopasswd)。"""
+    return [DOCKER] if os.geteuid() == 0 else ["sudo", "-n", DOCKER]
 
 
 def log(kind, msg):
@@ -88,11 +103,23 @@ def save_seen(seen):
         pass
 
 
+def hook_cfg():
+    """每次都读盘,不缓存 —— 改个开关不必重启服务。"""
+    try:
+        return json.load(io.open(HOOK_CFG, encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def rate_trigger():
+    return bool(hook_cfg().get("rate_trigger", True))
+
+
 def hook_secret():
     """URL 里带一段随机路径当凭据 —— Plex 的 webhook 不支持自定义请求头,没法加认证。
     没有它的话,同一局域网里任何人都能往这个端口投递伪造事件。"""
     try:
-        return json.load(io.open(HOOK_CFG, encoding="utf-8"))["secret"]
+        return hook_cfg()["secret"]
     except Exception:
         s = os.urandom(16).hex()
         with io.open(HOOK_CFG, "w", encoding="utf-8") as f:
@@ -139,12 +166,13 @@ def run(cmd, tag):
 
 def in_container(script, rk, extra=()):
     src = os.path.join(TOOLS, script)
-    run([DOCKER, "cp", src, "pd_zurg:/tmp/%s" % script], "cp %s" % script)
-    run([DOCKER, "exec", "pd_zurg", "/venv/bin/python3", "/tmp/%s" % script,
-         "--rk", rk, "--apply"] + list(extra), script)
+    d = docker_cmd()
+    run(d + ["cp", src, "pd_zurg:/tmp/%s" % script], "cp %s" % script)
+    run(d + ["exec", "pd_zurg", "/venv/bin/python3", "/tmp/%s" % script,
+             "--rk", rk, "--apply"] + list(extra), script)
 
 
-def handle(rk):
+def handle(rk, recheck=False, why="入库"):
     md = ready(rk)
     if md is None:
         log("SKIP", "rk=%s 等了 %d 分钟 Plex 还没分析完,放弃(下次入库事件会再来)"
@@ -154,11 +182,15 @@ def handle(rk):
     if md.get("grandparentTitle"):
         name = "%s S%02dE%02d" % (md["grandparentTitle"],
                                   md.get("parentIndex") or 0, md.get("index") or 0)
-    log("NEW", "入库 %s (rk=%s) —— 开始配字幕" % (name[:40], rk))
+    log("NEW", "%s %s (rk=%s) —— 开始配字幕%s"
+        % (why, name[:40], rk, "(强制重量)" if recheck else ""))
     in_container("fix_subs.py", rk, ["--mode", "missing"])
     in_container("fetch_subs.py", rk)
-    run(["/usr/bin/python3", os.path.join(TOOLS, "align_subs.py"),
-         "--rk", rk, "--apply", "--limit", "1"], "align_subs")
+    align = ["--rk", rk, "--apply", "--limit", "1"]
+    if recheck:
+        # 老片在 align_state.json 里已记"量过了",不加这个就整部被跳过
+        align.append("--recheck")
+    run(["/usr/bin/python3", os.path.join(TOOLS, "align_subs.py")] + align, "align_subs")
     in_container("fix_select.py", rk)
     log("DONE", "%s (rk=%s) 处理完毕" % (name[:40], rk))
 
@@ -166,16 +198,26 @@ def handle(rk):
 def worker():
     seen = load_seen()
     sset = set(seen)
+    last = {}
     while True:
-        rk = _q.get()
+        rk, recheck, force, why = _q.get()
         try:
-            if rk in sset:
+            now = time.time()
+            if force:
+                # 手动触发:seen 不拦(拦了就没法补老片),改用时间防抖
+                waited = now - last.get(rk, 0.0)
+                if waited < RATE_DEBOUNCE:
+                    log("SKIP", "rk=%s 刚在 %.0f 秒前处理过,防抖跳过" % (rk, waited))
+                    continue
+            elif rk in sset:
                 log("SKIP", "rk=%s 已经处理过,跳过重复事件" % rk)
                 continue
-            sset.add(rk)
-            seen.append(rk)
-            save_seen(seen)
-            handle(rk)
+            if rk not in sset:
+                sset.add(rk)
+                seen.append(rk)
+                save_seen(seen)
+            last[rk] = now
+            handle(rk, recheck=recheck, why=why)
         except Exception as e:
             log("WARN", "rk=%s 处理时异常: %s" % (rk, e))
         finally:
@@ -241,16 +283,32 @@ class Handler(BaseHTTPRequestHandler):
             return
         md = p.get("Metadata") or {}
         ev = p.get("event")
+        title = (md.get("title") or "-")[:40]
+        if ev == "media.rate":
+            # 打分当手势:"帮我修一下这部片的字幕"。评分本身不碰,所以正常打分也无副作用 ——
+            # 最坏情况就是白跑一遍幂等的四步。取消评分(负值)不触发。
+            rating = p.get("rating")
+            rk = md.get("ratingKey")
+            if not rate_trigger():
+                log("EVENT", "收到 media.rate(%s),打分触发已关闭,忽略" % title)
+            elif not rk or not isinstance(rating, (int, float)) or rating <= 0:
+                log("EVENT", "收到 media.rate(%s) rating=%s,不触发" % (title, rating))
+            else:
+                log("EVENT", "收到 media.rate(%s) rating=%s —— 当作手动触发,开始查字幕"
+                    % (title, rating))
+                for one in expand(rk, md.get("type")):
+                    _q.put((str(one), True, True, "手动(Plex 打分)"))
+            return
         if ev != "library.new":
             # 记一行:这是"Plex 确实在往这里投递"的唯一可观测证据,否则静默不知死活
-            log("EVENT", "收到 %s(%s),不是入库事件,忽略" % (ev, (md.get("title") or "-")[:40]))
+            log("EVENT", "收到 %s(%s),不是入库事件,忽略" % (ev, title))
             return
         rk = md.get("ratingKey")
         if not rk:
             log("WARN", "library.new 事件里没有 ratingKey,忽略")
             return
         for one in expand(rk, md.get("type")):
-            _q.put(str(one))
+            _q.put((str(one), False, False, "入库"))
 
     def do_GET(self):
         # 给"这个监听器还活着吗"一个能打的地址(不带密钥也答,但只说活着)

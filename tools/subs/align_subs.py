@@ -275,6 +275,17 @@ def pick_windows(cues, duration):
 
 # ---------------------------------------------------------------- 与外界交互
 
+def readable(path, need=65536):
+    """真读几十 KB 才算数 —— FUSE 上 os.path.exists / os.stat 对 RD 侧已死的文件同样成功,
+    只有读的时候才会 Input/output error。死档是**立刻返回 0 字节**(不是超时挂住),
+    所以这个探测很便宜:实测失败路径 0.08–0.5 秒。"""
+    try:
+        with io.open(path, "rb") as f:
+            return len(f.read(need)) > 0
+    except (IOError, OSError):
+        return False
+
+
 def host_path(plex_file):
     if plex_file.startswith(PLEX_PREFIX):
         return HOST_PREFIX + plex_file[len(PLEX_PREFIX):]
@@ -427,6 +438,14 @@ def main():
                     if not os.path.exists(path):
                         log("SKIP", "%s -> 文件不在:%s" % (name[:30], path[:60]))
                         state[key] = {"result": "nofile"}
+                        done += 1
+                        continue
+                    if not readable(path):
+                        # **不写 state**:死档以后可能被 rd_autoheal 换成活的,那时应当重新量,
+                        # 而不是被"量过了"挡在门外。重试的代价只有 64KB 一次读。
+                        log("DEAD", "%s -> 片源文件读不出字节(RD 侧死档,不是字幕问题;"
+                                    "归 rd_autoheal 换源):%s"
+                            % (name[:30], os.path.basename(path)[:60]))
                         done += 1
                         continue
                     refs = ref_track(streams)

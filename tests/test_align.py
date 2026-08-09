@@ -182,6 +182,18 @@ again = al.best_shift(al.cue_starts(fixed), truth)
 check("改写后残余偏移 ~0", again is not None and abs(again[0]) < 0.02,
       ("%+.4f" % again[0]) if again else "None")
 
+# —— 死档探测:FUSE 上 exists/stat 都成功,只有真读才知道 RD 侧链接死没死 ——
+import tempfile
+_fd, _p = tempfile.mkstemp()
+os.write(_fd, b"x" * 1024)
+os.close(_fd)
+check("有内容的文件 -> readable", al.readable(_p) is True)
+os.truncate(_p, 0)
+check("零字节文件 -> 不 readable", al.readable(_p) is False)
+os.unlink(_p)
+check("不存在的路径 -> 不 readable 且不抛", al.readable(_p) is False)
+check("目录 -> 不 readable 且不抛", al.readable(os.path.dirname(_p)) is False)
+
 print("\n常量: WIN=%.0fs MAX_SHIFT=%.0fs BIN=%.0fms MIN_PAIRS=%d MIN_RATIO=%.2f "
       "OK_SHIFT=%.2fs DRIFT_TOL=%.2fs FPS_TOL=%.4f DRIFT_MIN=%d/%.2f WEAK_MIN=%.1fs"
       % (al.WIN_SEC, al.MAX_SHIFT, al.BIN_SEC * 1000, al.MIN_PAIRS, al.MIN_RATIO,
