@@ -16,7 +16,9 @@ fix_subs —— 自动挑一条**时间轴对得上**的中文字幕挂到 Plex 
 import argparse, io, json, os, re, sys, time
 import urllib.request, urllib.parse, urllib.error
 
-LOG_PATH = "/log/subs.log"
+# 两个路径可用环境变量改指,只为单测能在容器外跑、且不往真日志里写假行
+LOG_PATH = os.environ.get("SUBS_LOG", "/log/subs.log")
+SETTINGS = os.environ.get("PD_SETTINGS", "/config/settings.json")
 
 MIN_CUES = 100           # 条目太少不像完整字幕
 
@@ -39,7 +41,7 @@ ap.add_argument("--probe", type=int, default=4, help="每部片实测几个候�
 ap.add_argument("--sections", default="1,2", help="Plex 分区号,逗号分隔")
 args = ap.parse_args()
 
-CFG = json.load(io.open("/config/settings.json", encoding="utf-8"))
+CFG = json.load(io.open(SETTINGS, encoding="utf-8"))
 BASE = CFG["Plex server address"]
 TOK = os.environ.get("PLEX_TOKEN") or CFG["Plex users"][0][1]
 _logged = [0]
@@ -193,6 +195,54 @@ def items():
             yield it["ratingKey"]
 
 
+def sub_streams(rk):
+    """片上现有的全部字幕流。每次现查 —— 挂过、删过之后,片上还剩什么只有 Plex 说了算。"""
+    st, d = px("GET", "/library/metadata/%s" % rk)
+    md = (d.get("Metadata") or [{}])[0]
+    return [s for m in md.get("Media") or [] for p in m.get("Part") or []
+            for s in p.get("Stream") or [] if s.get("streamType") == 3]
+
+
+def find_ext(rk, title):
+    """片上标题为 title 的外挂字幕的 stream id;没有返回 None。"""
+    for s in sub_streams(rk):
+        if s.get("key") and str(s.get("title") or "") == title:
+            return s["id"]
+    return None
+
+
+def attach(rk, s):
+    """把一条搜索结果挂上并等它生效,返回 stream id。"""
+    q = urllib.parse.urlencode({"key": s["key"], "language": args.lang})
+    st, _ = px("PUT", "/library/metadata/%s/subtitles?%s" % (rk, q))
+    if st != 200:
+        return None
+    for _ in range(10):
+        time.sleep(4)
+        sid = find_ext(rk, str(s.get("title") or ""))
+        if sid:
+            return sid
+    return None
+
+
+def ensure(rk, title):
+    """确保片上有标题为 title 的外挂字幕,返回它的 stream id;找不回返回 None。
+
+    **Plex 挂搜索结果字幕会顶替同语言上一条,不是追加**(1.43.2 实测:挂 A → 挂 B → A 立刻消失)。
+    逐个挂候选量完之后,片上只剩最后挂的那个 —— 赢家若不是它,删完落选就一条不剩,日志却照写
+    FIXED(《完美的日子》实撞)。所以收尾按标题核对,**缺了才重挂**:已在片上时再挂,旧版 Plex
+    是追加语义,实测造出过 16 条同名重复。搜索结果的 key 是临时的,重挂要重新搜一次拿新的。
+    """
+    sid = find_ext(rk, title)
+    if sid:
+        return sid
+    st, sd = px("GET", "/library/metadata/%s/subtitles?language=%s" % (rk, args.lang))
+    for c in sd.get("Stream") or []:
+        if str(c.get("title") or "") == title:
+            return attach(rk, c)
+    return None
+
+
 def main():
     done = 0
     keep = set(x for x in args.rk.split(",") if x)
@@ -264,28 +314,25 @@ def main():
             done += 1
             continue
 
-        def attach(s):
-            """挂上并等它生效,返回 stream id。"""
-            q = urllib.parse.urlencode({"key": s["key"], "language": args.lang})
-            st, _ = px("PUT", "/library/metadata/%s/subtitles?%s" % (rk, q))
-            if st != 200:
-                return None
-            for _ in range(10):
-                time.sleep(4)
-                st2, d2 = px("GET", "/library/metadata/%s" % rk)
-                m2 = (d2.get("Metadata") or [{}])[0]
-                for mm in m2.get("Media") or []:
-                    for pp in mm.get("Part") or []:
-                        for ss in pp.get("Stream") or []:
-                            if (ss.get("streamType") == 3 and ss.get("key")
-                                    and str(ss.get("title") or "") == str(s.get("title") or "")):
-                                return ss["id"]
-            return None
+        # 既有外挂要**在挂候选之前**量:挂候选会把它顶掉(见 ensure),顶掉之后就量不到了。
+        # 找不到替代也要处理"可证伪为错"的既有字幕:末条超出片长 = 铁定不是这个剪辑版,
+        # 留着它比没有更糟(用户会以为字幕坏了却不知道为什么)。
+        kept = []
+        for old_s in external:
+            if measure(old_s["id"], dur) is None:
+                st0, b0 = px("GET", "/library/streams/%s?download=1" % old_s["id"], js=False)
+                c0 = cues(b0.decode("utf-8", "replace")) if st0 == 200 else []
+                if c0 and max(c0) > dur + 5:
+                    px("DELETE", "/library/streams/%s" % old_s["id"])
+                    log("DROP", "%s -> 摘掉既有字幕 %s(末条 %.0fs 超出片长 %.0fs)"
+                        % (head, str(old_s.get("title"))[:40], max(c0), dur))
+                    continue
+            kept.append(old_s)
 
         # 先把前几个候选各挂一次量出时间码,再由"共识"决定谁对
         probed = []
         for sc, dl, s in scored[:args.probe]:
-            sid = attach(s)
+            sid = attach(rk, s)
             if not sid:
                 log("TRY", "%s 挂载没生效" % str(s.get("title"))[:50])
                 continue
@@ -295,49 +342,54 @@ def main():
                 px("DELETE", "/library/streams/%s" % sid)
                 continue
             probed.append((sc, dl, s, sid, m))
-        # 找不到替代也要处理"可证伪为错"的既有字幕:末条超出片长 = 铁定不是这个剪辑版,
-        # 留着它比没有更糟(用户会以为字幕坏了却不知道为什么)。
-        for old_s in external:
-            m0 = measure(old_s["id"], dur)
-            if m0 is None:
-                st0, b0 = px("GET", "/library/streams/%s?download=1" % old_s["id"], js=False)
-                c0 = cues(b0.decode("utf-8", "replace")) if st0 == 200 else []
-                if c0 and max(c0) > dur + 5 and args.apply:
-                    px("DELETE", "/library/streams/%s" % old_s["id"])
-                    log("DROP", "%s -> 摘掉既有字幕 %s(末条 %.0fs 超出片长 %.0fs)"
-                        % (head, str(old_s.get("title"))[:40], max(c0), dur))
+
+        winner = None
         if not probed:
             log("NOFIX", "%s -> 候选都量不出有效时间码" % head)
+        else:
+            truth, votes = consensus([p[4] for p in probed])
+            agree = [p for p in probed if abs(p[4][2] - truth) <= 60.0]
+            # 单个候选无从比对,退回一条宽松的绝对判据:末条不得早于片长的 75%
+            if len(probed) == 1 and (dur - probed[0][4][2]) > dur * 0.25:
+                log("NOFIX", "%s -> 只有 1 个候选且末条距片尾 %.0fs,无从佐证,不挂"
+                    % (head, dur - probed[0][4][2]))
+            else:
+                winner = max(agree, key=lambda p: (p[0], p[1])) if agree else None
+                if winner is None:
+                    log("NOFIX", "%s -> %d 个候选彼此不一致,无法确定哪个对" % (head, len(probed)))
+        for p in probed:
+            if winner is None or p[3] != winner[3]:
+                px("DELETE", "/library/streams/%s" % p[3])   # 已被顶掉的会 404,无害
+
+        if winner is None:
+            # 没换成:探测时顶掉的既有字幕要找回来。全部重挂完再查 —— 后挂的可能又顶掉先挂的
+            for old_s in kept:
+                ensure(rk, str(old_s.get("title") or ""))
+            lost = [s for s in kept if not find_ext(rk, str(s.get("title") or ""))]
+            if lost:
+                log("LOST", "%s -> 探测候选时顶掉了既有字幕且找不回:%s(搜索结果里没有,"
+                    "多半是上传来的,得重新上传)"
+                    % (head, ", ".join(str(s.get("title"))[:40] for s in lost)))
             done += 1
             continue
 
-        truth, votes = consensus([p[4] for p in probed])
-        agree = [p for p in probed if abs(p[4][2] - truth) <= 60.0]
-        # 单个候选无从比对,退回一条宽松的绝对判据:末条不得早于片长的 75%
-        if len(probed) == 1 and (dur - probed[0][4][2]) > dur * 0.25:
-            log("NOFIX", "%s -> 只有 1 个候选且末条距片尾 %.0fs,无从佐证,不挂"
-                % (head, dur - probed[0][4][2]))
-            px("DELETE", "/library/streams/%s" % probed[0][3])
-            done += 1
-            continue
-        winner = max(agree, key=lambda p: (p[0], p[1])) if agree else None
-        for p in probed:
-            if winner is None or p[3] != winner[3]:
-                px("DELETE", "/library/streams/%s" % p[3])
-        if winner is not None:
-            for old_s in external:
-                if str(old_s.get("title") or "") != str(winner[2].get("title") or ""):
-                    px("DELETE", "/library/streams/%s" % old_s["id"])
-                    log("DROP", "移除原有的 %s" % str(old_s.get("title"))[:56])
-        if winner is None:
-            log("NOFIX", "%s -> %d 个候选彼此不一致,无法确定哪个对" % (head, len(probed)))
+        wt = str(winner[2].get("title") or "")
+        for old_s in kept:
+            if str(old_s.get("title") or "") != wt:
+                px("DELETE", "/library/streams/%s" % old_s["id"])
+                log("DROP", "移除原有的 %s" % str(old_s.get("title"))[:56])
+        # 赢家可能已被后挂的候选顶掉:核对、缺了重挂,再拉回来量一次 —— 量出来跟探测时
+        # 一致才记 FIXED。只凭"流程走完了"就记,会把片上一条不剩写成成功。
+        n, first, last = winner[4]
+        sid = ensure(rk, wt)
+        m = measure(sid, dur) if sid else None
+        if m is None or m[0] != n:
+            log("LOST", "%s -> 赢家 %s 被后挂的候选顶掉,%s"
+                % (head, wt[:46], "重挂没成功(搜索结果里已没有它)" if not sid
+                   else "重挂后量出 %s 条,跟探测时的 %d 条对不上" % (m[0] if m else "不出", n)))
         else:
-            n, first, last = winner[4]
             log("FIXED", "%s -> %s;%d 条,首 %.0fs,末 %.0fs(%d/%d 个候选一致,距片尾 %.0fs)"
-                % (head, str(winner[2].get("title"))[:46], n, first, last,
-                   votes, len(probed), dur - last))
-            # 赢家在探测阶段就已经挂上了(winner[3] 是它的 stream id),这里**不要再挂一次** ——
-            # 重挂会生成第二条同名字幕,实测制造了 16 条重复。
+                % (head, wt[:46], n, first, last, votes, len(probed), dur - last))
         done += 1
     if not _logged[0]:
         print("(无需变更,未写 log)")
