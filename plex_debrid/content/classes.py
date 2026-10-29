@@ -1013,6 +1013,11 @@ class media:
                         retries = int(float(trigger[2]))
         if retries == 0:
             return
+        if getattr(self, 'rate_limited', False):
+            # Real-Debrid refused to look at the releases (429), so this round says nothing about whether one exists
+            self.rate_limited = False
+            ui_print('real-debrid rate limited this round, not counting it as a failed attempt for item: ' + self.query())
+            return
         if retry_after.known(self):
             entry = retry_after.defer(self)
             ui_print('still nothing for item: ' + self.query() + ' - next attempt in ' + str(retry_after.hours) + 'h (' + entry['next_utc'] + ', cool-down #' + str(entry['rounds']) + ')')
@@ -1608,6 +1613,10 @@ class media:
                     episode.downloaded()
 
     def debrid_download(self, force=False):
+        # rate_limited is set by the debrid service when Real-Debrid keeps answering 429. Track this call's own flag so a
+        # stale one doesn't cut the release loop short, but keep an earlier one for watch() (an item can get here twice).
+        limited_before = getattr(self, 'rate_limited', False)
+        self.rate_limited = False
         debrid.check(self)
         self.bitrate()
         if len(self.Releases) > 0:
@@ -1645,8 +1654,13 @@ class media:
                             downloaded += [True]
                             ver_dld = True
                             break
+                    if self.rate_limited:
+                        break
                 if not ver_dld:
                     downloaded += [False]
+                if self.rate_limited:
+                    break
+        self.rate_limited = self.rate_limited or limited_before
         return True in downloaded, (False in downloaded or len(downloaded) == 0)
 
     def files(self):

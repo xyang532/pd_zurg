@@ -2,6 +2,7 @@
 from base import *
 from ui.ui_print import *
 import releases
+import threading
 
 # (required) Name of the Debrid service
 name = "Real Debrid"
@@ -75,6 +76,35 @@ def post(url, data):
         response = None
     return response
 
+# addMagnet pacing. Real-Debrid answers 429 too_many_requests (error_code 34) far below its documented 250 requests a
+# minute: on 2026-10-29 plex_debrid sent ~54 adds a minute and only ~10 got through. A 429'd release was never judged
+# by RD, yet it used to be skipped like a bad one and the item counted as "nothing found" (and cooled down for 12h).
+# So: space adds out below that rate, and on a 429 wait and retry the same release instead of moving on.
+add_interval = 7.5          # seconds between two addMagnet calls (~8 a minute)
+add_backoff = [15, 30, 60]  # waits before retrying the same release after a 429
+add_lock = threading.Lock()
+last_add = 0.0
+
+def rate_limited(response):
+    return hasattr(response, 'error') and response.error == 'too_many_requests'
+
+def add_magnet(magnet, title=''):
+    global last_add
+    response = None
+    for attempt, wait in enumerate([0] + add_backoff):
+        if wait:
+            ui_print(f'[realdebrid]: rate limited (429) when adding {title}, retrying the same release in {wait}s ({attempt}/{len(add_backoff)})')
+            time.sleep(wait)
+        with add_lock:
+            delay = last_add + add_interval - time.time()
+            if delay > 0:
+                time.sleep(delay)
+            last_add = time.time()
+        response = post('https://api.real-debrid.com/rest/1.0/torrents/addMagnet', {'magnet': magnet})
+        if not rate_limited(response):
+            return response
+    return response
+
 # Delete Function
 def delete(url):
     headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/50.0.2661.102 Safari/537.36','authorization': 'Bearer ' + api_key}
@@ -137,7 +167,13 @@ def download(element, stream=True, query='', force=False):
     for release in cached[:]:
         try:  # if release matches query
             if regex.match(query, release.title,regex.I) or force:
-                response = post('https://api.real-debrid.com/rest/1.0/torrents/addMagnet', {'magnet': release.download[0]})
+                response = add_magnet(release.download[0], release.title)
+                if rate_limited(response):
+                    # still 429 after backing off: trying the remaining releases now would only be 429'd too.
+                    # Flag the item so this round is not counted as a failed attempt (see media.watch).
+                    element.rate_limited = True
+                    ui_print(f'[realdebrid]: still rate limited after {len(add_backoff)} retries, leaving {release.title} and the remaining releases for the next round.')
+                    return False
                 if hasattr(response, 'error') and response.error == 'infringing_file':
                     ui_print(f'[realdebrid]: torrent {release.title} marked as infringing... looking for another release.')
                     time.sleep(0.5)
@@ -148,7 +184,7 @@ def download(element, stream=True, query='', force=False):
                     continue
                 elif not hasattr(response, "id"):
                     ui_print(f'[realdebrid]: unexpected error when adding torrent {release.title}.')
-                    # 没有 id 通常是被 RD 限流了;这里必须退避,否则会越失败冲得越猛
+                    # 429 已在 add_magnet 里退避重试;走到这里的是别的错误,仍要退避,否则会越失败冲得越猛
                     time.sleep(1.0)
                     continue
                 time.sleep(1.0)
