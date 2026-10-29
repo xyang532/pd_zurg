@@ -4,6 +4,7 @@ import releases
 import debrid
 import scraper
 from ui.ui_print import *
+import threading
 
 imdb_scraped = False
 
@@ -194,6 +195,79 @@ class ignore:
             if service.check(self):
                 check = True
         return check
+
+
+class retry_after:
+    # Items that used up their retry budget wait here instead of going onto the ignore list for good: a few hours of
+    # a dead scraper or Real-Debrid errors used to be enough to drop an item forever. After the first cool-down an item
+    # gets one attempt per cool-down. Stored next to ignored.txt so a container restart doesn't reset the wait:
+    # {query: {"next": unix time it may be tried again, "next_utc": same for humans, "rounds": cool-downs so far, "first": first give-up}}
+
+    hours = 12
+    path = ''
+    entries = None
+    lock = threading.Lock()
+
+    def file():
+        if retry_after.path != '':
+            return retry_after.path
+        from content.services import textfile
+        return os.path.join(textfile.library.ignore.path or '/config/', 'retry_after.json')
+
+    def load():
+        if retry_after.entries is None:
+            path = retry_after.file()
+            try:
+                with open(path, encoding='utf-8') as f:
+                    retry_after.entries = json.load(f)
+            except FileNotFoundError:
+                retry_after.entries = {}
+            except Exception as e:
+                # keep the unreadable file for inspection instead of overwriting it on the next save
+                aside = path + '.unreadable-' + time.strftime('%Y%m%d_%H%M%S')
+                try:
+                    os.replace(path, aside)
+                except Exception:
+                    pass
+                ui_print('[retry after] error: couldnt read ' + path + ' (' + str(e) + '), moved it to ' + aside + ' and starting empty')
+                retry_after.entries = {}
+        return retry_after.entries
+
+    def save():
+        path = retry_after.file()
+        try:
+            with open(path + '.tmp', 'w', encoding='utf-8') as f:
+                json.dump(retry_after.entries, f, indent=1, sort_keys=True, ensure_ascii=False)
+            os.replace(path + '.tmp', path)
+        except Exception as e:
+            ui_print('[retry after] error: couldnt save ' + path + ', the wait will not survive a restart: ' + str(e))
+
+    def key(item):
+        return item.query().lower()
+
+    def known(item):
+        return retry_after.key(item) in retry_after.load()
+
+    def waiting(item):
+        entry = retry_after.load().get(retry_after.key(item))
+        return entry is not None and time.time() < entry['next']
+
+    def defer(item):
+        with retry_after.lock:
+            entries = retry_after.load()
+            now = time.time()
+            entry = entries.get(retry_after.key(item), {'rounds': 0, 'first': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now))})
+            entry['rounds'] += 1
+            entry['next'] = now + retry_after.hours * 3600
+            entry['next_utc'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(entry['next']))
+            entries[retry_after.key(item)] = entry
+            retry_after.save()
+            return entry
+
+    def clear(item):
+        with retry_after.lock:
+            if retry_after.load().pop(retry_after.key(item), None) is not None:
+                retry_after.save()
 
 
 class map:
@@ -933,6 +1007,10 @@ class media:
                         retries = int(float(trigger[2]))
         if retries == 0:
             return
+        if retry_after.known(self):
+            entry = retry_after.defer(self)
+            ui_print('still nothing for item: ' + self.query() + ' - next attempt in ' + str(retry_after.hours) + 'h (' + entry['next_utc'] + ', cool-down #' + str(entry['rounds']) + ')')
+            return
 
         message = 'retrying download in ' + str(
             round(int(ui_settings.loop_interval_seconds) / 60)) + 'min for item: ' + self.query() + ' - version/s [' + '],['.join(
@@ -948,13 +1026,14 @@ class media:
                 ui_print(message + ' - attempt ' + str(match.ignored_count) + '/' + str(retries))
             else:
                 media.ignore_queue.remove(match)
-                ignore.add(self)
+                entry = retry_after.defer(self)
+                ui_print('no luck after ' + str(retries) + ' attempts for item: ' + self.query() + ' - next attempt in ' + str(retry_after.hours) + 'h (' + entry['next_utc'] + ')')
 
     def unwatch(self):
         ignore.remove(self)
 
     def watched(self):
-        return ignore.check(self)
+        return ignore.check(self) or retry_after.waiting(self)
 
     def released(self):
         try:
@@ -1490,6 +1569,7 @@ class media:
         if self.type == "movie" or self.type == "episode":
             media.downloaded_versions += [self.query() +
                                           ' [' + self.version.name + ']']
+            retry_after.clear(self)
         elif self.type == 'show':
             filemode = False
             for season in self.Seasons:
