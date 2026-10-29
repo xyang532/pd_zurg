@@ -631,6 +631,12 @@ class media:
                         if hasattr(season, 'Episodes'):
                             for episode in season.Episodes:
                                 episode.alternate_titles = self.alternate_titles
+        # Plex tells remakes apart by a country suffix, "The Office (US)", that releases mostly leave out:
+        # 1,744 The.Office.SxxEyy releases were turned down on 10-28. Accept the bare title too. The scrapers
+        # look results up by imdb id, so this does not pull in the other country's show.
+        bare = regex.sub(r'\s*\((US|UK|AU|NZ|CA|IE)\)$', '', self.title or '')
+        if bare != self.title and hasattr(self, 'alternate_titles') and not releases.rename(bare) in self.alternate_titles:
+            self.alternate_titles.append(releases.rename(bare))
 
     def deviation(self, year=""):
         self.versions()

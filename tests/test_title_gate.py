@@ -75,6 +75,18 @@ check("老友记 整剧", show.deviation(),
       accept=["Friends.1994.Complete.Series.BDRip", "Friends.S01-S10.1080p.BluRay"],
       reject=["Just Good Friends S01-S03 DVDRip", "Thomas.and.Friends.Complete.Series"])
 
+# 带国家后缀的剧名:aliases() 要补一个不带后缀的写法,别名经季传到集
+office_ep = item(type="episode", grandparentTitle="The Office (US)", grandparentYear=2005, parentIndex=2, index=19,
+                 originallyAvailableAt="2006-04-27")
+office_season = item(type="season", parentTitle="The Office (US)", parentYear=2005, index=2, Episodes=[office_ep])
+office = item(type="show", title="The Office (US)", year=2005, Seasons=[office_season])
+office.aliases('en')
+check("办公室 S02E19", office_ep.deviation(),
+      accept=["The.Office.US.S02E19.Michaels.Birthday.1080p.BluRay.DDP5.1.x264-BTN.mkv",
+              "The.Office.S02E19.720p.BluRay.nHD.x264-NhaNc3.mkv",
+              "The Office US S02E19  720p BluRay x264 UnIon mp4"],
+      reject=["The.Office.UK.S02E19.720p.mkv", "The.Office.2001.S02E19.DVDRip"])
+
 movie = item(type="movie", title="Trainspotting", year=1996)
 check("猜火车", movie.deviation(),
       accept=["Trainspotting.1996.1080p.BluRay.x264", "[YTS] Trainspotting (1996) 720p"],
