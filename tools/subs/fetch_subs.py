@@ -22,13 +22,18 @@ import urllib.request, urllib.parse, urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-LOG_PATH = "/log/subs.log"
-KEYS = "/config/subs_keys.json"
+LOG_PATH = os.environ.get("SUBS_LOG", "/log/subs.log")
+KEYS = os.environ.get("SUBS_KEYS", "/config/subs_keys.json")
+SETTINGS = os.environ.get("PD_SETTINGS", "/config/settings.json")
 MIN_CUES = 100
 TS_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})")
 STOP = {"the", "a", "an", "of", "and", "in", "on", "to", "for", "part", "le", "la"}
 MIN_TITLE_OVERLAP = 0.5
 BAD_SRC = re.compile(r"(?<![A-Za-z0-9])(TELESYNC|TS|CAM|HDCAM|HDTS|SCREENER|SCR|WORKPRINT)(?![A-Za-z0-9])", re.I)
+SUB_EXT = (".srt", ".ass", ".ssa")
+# 分段字幕(给 CD1/CD2 两段片源做的)每份只有半部片。只认 cd/disc 加数字 —— "Part 1"
+# 是片名的一部分(《死亡圣器 上》),不能当分段。
+SPLIT_RE = re.compile(r"(?<![A-Za-z0-9])(cd|disc)[\s._-]?\d(?![0-9])", re.I)
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--apply", action="store_true")
@@ -36,12 +41,15 @@ ap.add_argument("--only", default="")
 # 事件触发时只处理刚入库的那一个条目 —— 中文片名经 ssh/locale 传不可靠,按 ratingKey 指
 ap.add_argument("--rk", default="", help="只处理这些 ratingKey(逗号分隔)")
 ap.add_argument("--limit", type=int, default=5)
-ap.add_argument("--probe", type=int, default=2,
-                help="每部片下载几个候选。**下载是稀缺资源**(assrt 免费额度很小),别调大")
+# 原来默认 2、注释写"下载是稀缺资源别调大" —— 那是把 /v1/user/quota 误读成额度时定的;
+# 实际是按分钟的速率限制(见 PACE),web() 已按它节流。只看 2 个条目时,对的那个排第 3
+# 以后就永远轮不到(《汉娜姐妹》:前 2 名一个只有繁体、一个 0 文件,简中排第 3–5)。
+ap.add_argument("--probe", type=int, default=6,
+                help="每部片最多看几个 assrt 条目(每个条目 1 次详情 + 至多 2 次下载)")
 ap.add_argument("--sections", default="1,2")
 args = ap.parse_args()
 
-CFG = json.load(io.open("/config/settings.json", encoding="utf-8"))
+CFG = json.load(io.open(SETTINGS, encoding="utf-8"))
 BASE = CFG["Plex server address"]
 TOK = os.environ.get("PLEX_TOKEN") or CFG["Plex users"][0][1]
 K = json.load(io.open(KEYS, encoding="utf-8"))
@@ -75,13 +83,28 @@ def px(method, path, body=None, ctype=None, js=True, timeout=180):
 
 
 def web(url, timeout=60):
-    paced()
-    try:
-        r = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(r, timeout=timeout) as resp:
-            return resp.status, resp.read()
-    except Exception:
-        return 0, b""
+    """返回 (HTTP 状态, 字节)。assrt 超限(rate_limited())时等 RATE_WAIT 秒重试,共 RATE_TRIES 次,
+    每次记一行 RATE;其它 HTTP 错误如实返回状态码,连不上返回 0。
+    原来 `except Exception` 把 HTTPError 也吞成 0,下载处那段"遇 402 等 30 秒"从来走不到,
+    限流全被记成"下载失败"/"无匹配文件"(2026-10-31 重跑 46 条,前 19 条全是这样)。"""
+    code = 0
+    for i in range(RATE_TRIES):
+        paced()
+        try:
+            r = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(r, timeout=timeout) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as e:
+            code = e.code
+            if not rate_limited(code, url):
+                return code, b""
+            log("RATE", "assrt 超限(HTTP %d),第 %d/%d 次%s" % (
+                code, i + 1, RATE_TRIES, ",等 %d 秒再试" % RATE_WAIT if i + 1 < RATE_TRIES else ",放弃这次请求"))
+            if i + 1 < RATE_TRIES:
+                time.sleep(RATE_WAIT)
+        except Exception:
+            return 0, b""
+    return code, b""
 
 
 def toks(s):
@@ -179,13 +202,23 @@ def assrt_search(query):
 
 
 _last = [0.0]
+# assrt 限速(不是每日额度)。文档写 20 次/分钟,2026-10-31 实测像令牌桶:/v1/user/quota 空闲时最多回 5,
+# 每 3.2 秒 1 次连发 15 次有 4 次被拒 ⇒ 可持续约 7.5 次/分钟。超了回 **509**
+# `{"status":30900,"errmsg":"you are exceeding request limits"}`(早先 API 超限回 402)。
+PACE = 12.5               # 秒/次,4.8 次/分钟,给监听器与手动重跑同时跑留余量
+RATE_WAIT, RATE_TRIES = 60, 3
+
+
+def rate_limited(code, url):
+    """509 一律是超限;402 只在 API 主机上算超限。**下载主机 file*.assrt.net 回 402 是这个文件
+    拒绝下载**,和速率无关:《第一头牛》EVO 条目的 .ass 从 05:48 到 06:11 一直 402,
+    同一时段别的文件照常 200 —— 重试只是白等。"""
+    return code == 509 or (code == 402 and urllib.parse.urlsplit(url).netloc == "api.assrt.net")
 
 
 def paced():
-    """assrt 是 **20 次/分钟**的速率限制(不是每日额度 —— 我一开始读错了,
-    /v1/user/quota 返回的是当前这一分钟的剩余请求数)。超了会返回 402。
-    按 3 秒一次节流,稳稳压在限额内。"""
-    d = 3.2 - (time.time() - _last[0])
+    """按 PACE 节流。只管本进程;监听器和手动重跑同时跑时靠 web() 的超限重试兜住。"""
+    d = PACE - (time.time() - _last[0])
     if d > 0:
         time.sleep(d)
     _last[0] = time.time()
@@ -209,8 +242,14 @@ def assrt_files(sub_id):
         return []
     try:
         s = ((json.loads(b).get("sub") or {}).get("subs") or [{}])[0]
-        return [(f.get("f"), f.get("url")) for f in (s.get("filelist") or [])
-                if f.get("url") and str(f.get("f", "")).lower().endswith((".srt", ".ass", ".ssa"))]
+        files = [(f.get("f"), f.get("url")) for f in (s.get("filelist") or [])
+                 if f.get("url") and str(f.get("f", "")).lower().endswith(SUB_EXT)]
+        # 只有压缩包条目才有 filelist;单个字幕文件直接上传的条目,文件就是条目本身
+        # (filename + url)。原来只看 filelist,这类条目一律算 0 个文件 ——
+        # 《汉娜姐妹》唯一对版的 BluRay 简中(CtrlHD.chs.srt)就是这么漏的。
+        if not files and s.get("url") and str(s.get("filename") or "").lower().endswith(SUB_EXT):
+            files = [(s["filename"], s["url"])]
+        return files
     except Exception:
         return []
 
@@ -240,8 +279,7 @@ def items():
 
 def main():
     done = 0
-    print("assrt 本分钟剩余请求数: %s(限额 20 次/分钟,已按 3.2 秒/次节流)"
-          % (assrt_quota() if True else "?"))
+    print("assrt 本分钟剩余请求数: %s(已按 %.1f 秒/次节流)" % (assrt_quota(), PACE))
     keep = set(x for x in args.rk.split(",") if x)
     for rk in items():
         if keep and str(rk) not in keep:
@@ -313,18 +351,20 @@ def main():
             for fn, url in assrt_files(sid):
                 if ep and not re.search(r"(?<![0-9])S0*%dE0*%d(?![0-9])" % ep, fn, re.I):
                     continue
+                # 分段字幕的两段末条时间彼此接近,会互相"佐证"成共识,把半部字幕当整部传上去
+                if SPLIT_RE.search(fn):
+                    why_fail["分段字幕"] = why_fail.get("分段字幕", 0) + 1
+                    continue
                 # 合集条目(如"哈利波特1-8部合集")里装着多部电影的字幕,逐个文件验片名
                 if not same_film(fn, titles):
                     continue
                 files.append((fn, url))
             for fn, url in files[:2]:
                 st2, raw = web(url)
-                if st2 == 402:
-                    log("RATE", "撞到 assrt 速率上限,等 30 秒再继续")
-                    time.sleep(30)
-                    st2, raw = web(url)
                 if st2 != 200 or not raw:
-                    why_fail["下载失败"] = why_fail.get("下载失败", 0) + 1
+                    k = ("限流" if rate_limited(st2, url) else
+                         "拒绝下载(402)" if st2 == 402 else "下载失败")
+                    why_fail[k] = why_fail.get(k, 0) + 1
                     continue
                 txt, enc = decode(raw)
                 if not txt:
@@ -337,7 +377,9 @@ def main():
                 if c[-1] > dur + 5:
                     why_fail["末条超片长"] = why_fail.get("末条超片长", 0) + 1
                     continue
-                probed.append({"rank": max(rank, lang_rank("", fn)), "name": fn, "vn": vn,
+                # 文件名上的语言标记比条目的 lang.desc 可靠:条目常写"英 简 繁",里面却只装
+                # 一个 .cht.srt(《汉娜姐妹》605590)。原来取两者较大值,繁体文件被当成简中。
+                probed.append({"rank": lang_rank("", fn) or rank, "name": fn, "vn": vn,
                                "n": len(c), "first": c[0], "last": c[-1],
                                "text": txt, "enc": enc})
         if not probed:
@@ -356,9 +398,11 @@ def main():
         # 只有一个候选时没有佐证可依,退回一条宽松的绝对闸:末条不得早于片长的 75%。
         # 实测《办公室 S05E21》:片长 33 分(加长版),而唯一候选是 21 分的电视播出版字幕,
         # 差了 36% —— 共识机制在样本量为 1 时形同虚设,必须有这道兜底。
-        if votes == 1 and (dur - truth) > dur * 0.25:
-            log("NOFIX", "%s -> 仅 1 个候选且末条距片尾 %.0fs(%.0f%%),无佐证,不采用"
-                % (head, dur - truth, 100.0 * (dur - truth) / dur))
+        # 现在每部看 6 个条目,两份同样残缺的字幕(别的剪辑版、分段)互相佐证的机会变大,
+        # 所以这道闸不论票数都要过:整部片的字幕末条不可能离片尾超过四分之一。
+        if (dur - truth) > dur * 0.25:
+            log("NOFIX", "%s -> %d 个候选的末条都在片尾前 %.0fs(%.0f%%),像分段或别的剪辑版,不采用"
+                % (head, votes, dur - truth, 100.0 * (dur - truth) / dur))
             done += 1
             continue
         w = max(agree, key=lambda p: (p["rank"], p["n"]))
