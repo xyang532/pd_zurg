@@ -168,14 +168,17 @@ lt = run({
 check("没有上传", UPLOADS == [], str([n for n, _ in UPLOADS]))
 check("记 NOFIX", "NOFIX" in lt, lt.strip()[-140:])
 
-print("四、下载被限流(509):记「限流」,不记「下载失败」")
-lt = run({
-    "search": [{"id": 315383, "videoname": CTRL.replace(".", " "), "lang": None}],
-    "detail": {315383: {"filename": CTRL + ".chs.srt", "url": "http://dl/ctrl1", "filelist": []}},
-    "files": {}, "codes": {"http://dl/ctrl1": 509},
-})
-check("没有上传", UPLOADS == [])
-check("NONE 行写的是限流", "限流" in lt and "下载失败" not in lt, lt.strip()[-140:])
+print("四、下载被限流(509)记「限流」;下载主机回 402 记「拒绝下载」(那是单个文件拒下,不是限流)")
+for code, want in ((509, "限流"), (402, "拒绝下载(402)")):
+    lt = run({
+        "search": [{"id": 315383, "videoname": CTRL.replace(".", " "), "lang": None}],
+        "detail": {315383: {"filename": CTRL + ".chs.srt", "url": "https://file1.assrt.net/ctrl1",
+                            "filelist": []}},
+        "files": {}, "codes": {"https://file1.assrt.net/ctrl1": code},
+    })
+    check("下载 %d:没有上传" % code, UPLOADS == [])
+    check("下载 %d:NONE 行写「%s」" % (code, want), (want + "×1") in lt and "下载失败" not in lt,
+          lt.strip()[-140:])
 
 print("五、web() 本身:509 重试、其它错误不重试(2026-10-31 起 assrt 超限回 509,原代码把它吞成 0)")
 import urllib.error as UE
@@ -219,17 +222,20 @@ def scripted(codes):
 import time as REAL_TIME
 real_open, real_paced = G.urllib.request.urlopen, G.paced
 G.paced = lambda: None
-for label, codes, want, sleeps, rates in (
-        ("509 两次后成功", [509, 509, 200], 200, 2, 2),
-        ("402 也算超限", [402, 200], 200, 1, 1),
-        ("一直 509:3 次后放弃并返回 509", [509, 509, 509], 509, 2, 3),
-        ("404 不重试,如实返回 404", [404], 404, 0, 0)):
+API, FILE = "https://api.assrt.net/v1/sub/detail?id=1", "https://file1.assrt.net/onthefly/1/x.srt"
+for label, url, codes, want, sleeps, rates in (
+        ("509 两次后成功", API, [509, 509, 200], 200, 2, 2),
+        ("API 主机回 402 也算超限", API, [402, 200], 200, 1, 1),
+        ("下载主机回 402 = 文件拒下,不重试", FILE, [402], 402, 0, 0),
+        ("下载主机回 509 照样重试", FILE, [509, 200], 200, 1, 1),
+        ("一直 509:3 次后放弃并返回 509", API, [509, 509, 509], 509, 2, 3),
+        ("404 不重试,如实返回 404", API, [404], 404, 0, 0)):
     G.time = FakeTime()
     G.urllib.request.urlopen = scripted(codes)
     if os.path.exists(LOG):
         os.remove(LOG)
     try:
-        st, b = REAL_WEB("http://api/x")
+        st, b = REAL_WEB(url)
     finally:
         G.urllib.request.urlopen = real_open
     lt = io.open(LOG, encoding="utf-8").read() if os.path.exists(LOG) else ""

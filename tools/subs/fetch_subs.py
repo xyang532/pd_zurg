@@ -83,7 +83,7 @@ def px(method, path, body=None, ctype=None, js=True, timeout=180):
 
 
 def web(url, timeout=60):
-    """返回 (HTTP 状态, 字节)。assrt 超限(RATE_CODES)时等 RATE_WAIT 秒重试,共 RATE_TRIES 次,
+    """返回 (HTTP 状态, 字节)。assrt 超限(rate_limited())时等 RATE_WAIT 秒重试,共 RATE_TRIES 次,
     每次记一行 RATE;其它 HTTP 错误如实返回状态码,连不上返回 0。
     原来 `except Exception` 把 HTTPError 也吞成 0,下载处那段"遇 402 等 30 秒"从来走不到,
     限流全被记成"下载失败"/"无匹配文件"(2026-10-31 重跑 46 条,前 19 条全是这样)。"""
@@ -96,7 +96,7 @@ def web(url, timeout=60):
                 return resp.status, resp.read()
         except urllib.error.HTTPError as e:
             code = e.code
-            if code not in RATE_CODES:
+            if not rate_limited(code, url):
                 return code, b""
             log("RATE", "assrt 超限(HTTP %d),第 %d/%d 次%s" % (
                 code, i + 1, RATE_TRIES, ",等 %d 秒再试" % RATE_WAIT if i + 1 < RATE_TRIES else ",放弃这次请求"))
@@ -202,12 +202,18 @@ def assrt_search(query):
 
 
 _last = [0.0]
-# assrt 按分钟限速(不是每日额度 —— /v1/user/quota 返回的是当前这一分钟的剩余请求数)。
-# 早先实测 20 次/分钟、超了回 402;2026-10-31 实测**每分钟 5 次**(空闲 3 分钟剩余数一直停在 5,
-# 详情与下载都计数、查配额不计),超了回 **509** `{"status":30900,"errmsg":"you are exceeding request limits"}`。
-PACE = 12.5               # 秒/次,对应 4.8 次/分钟
-RATE_CODES = (402, 509)
+# assrt 限速(不是每日额度)。文档写 20 次/分钟,2026-10-31 实测像令牌桶:/v1/user/quota 空闲时最多回 5,
+# 每 3.2 秒 1 次连发 15 次有 4 次被拒 ⇒ 可持续约 7.5 次/分钟。超了回 **509**
+# `{"status":30900,"errmsg":"you are exceeding request limits"}`(早先 API 超限回 402)。
+PACE = 12.5               # 秒/次,4.8 次/分钟,给监听器与手动重跑同时跑留余量
 RATE_WAIT, RATE_TRIES = 60, 3
+
+
+def rate_limited(code, url):
+    """509 一律是超限;402 只在 API 主机上算超限。**下载主机 file*.assrt.net 回 402 是这个文件
+    拒绝下载**,和速率无关:《第一头牛》EVO 条目的 .ass 从 05:48 到 06:11 一直 402,
+    同一时段别的文件照常 200 —— 重试只是白等。"""
+    return code == 509 or (code == 402 and urllib.parse.urlsplit(url).netloc == "api.assrt.net")
 
 
 def paced():
@@ -356,7 +362,8 @@ def main():
             for fn, url in files[:2]:
                 st2, raw = web(url)
                 if st2 != 200 or not raw:
-                    k = "限流" if st2 in RATE_CODES else "下载失败"
+                    k = ("限流" if rate_limited(st2, url) else
+                         "拒绝下载(402)" if st2 == 402 else "下载失败")
                     why_fail[k] = why_fail.get(k, 0) + 1
                     continue
                 txt, enc = decode(raw)
