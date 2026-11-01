@@ -22,13 +22,18 @@ import urllib.request, urllib.parse, urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-LOG_PATH = "/log/subs.log"
-KEYS = "/config/subs_keys.json"
+LOG_PATH = os.environ.get("SUBS_LOG", "/log/subs.log")
+KEYS = os.environ.get("SUBS_KEYS", "/config/subs_keys.json")
+SETTINGS = os.environ.get("PD_SETTINGS", "/config/settings.json")
 MIN_CUES = 100
 TS_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})")
 STOP = {"the", "a", "an", "of", "and", "in", "on", "to", "for", "part", "le", "la"}
 MIN_TITLE_OVERLAP = 0.5
 BAD_SRC = re.compile(r"(?<![A-Za-z0-9])(TELESYNC|TS|CAM|HDCAM|HDTS|SCREENER|SCR|WORKPRINT)(?![A-Za-z0-9])", re.I)
+SUB_EXT = (".srt", ".ass", ".ssa")
+# 分段字幕(给 CD1/CD2 两段片源做的)每份只有半部片。只认 cd/disc 加数字 —— "Part 1"
+# 是片名的一部分(《死亡圣器 上》),不能当分段。
+SPLIT_RE = re.compile(r"(?<![A-Za-z0-9])(cd|disc)[\s._-]?\d(?![0-9])", re.I)
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--apply", action="store_true")
@@ -36,12 +41,15 @@ ap.add_argument("--only", default="")
 # 事件触发时只处理刚入库的那一个条目 —— 中文片名经 ssh/locale 传不可靠,按 ratingKey 指
 ap.add_argument("--rk", default="", help="只处理这些 ratingKey(逗号分隔)")
 ap.add_argument("--limit", type=int, default=5)
-ap.add_argument("--probe", type=int, default=2,
-                help="每部片下载几个候选。**下载是稀缺资源**(assrt 免费额度很小),别调大")
+# 原来默认 2、注释写"下载是稀缺资源别调大" —— 那是把 /v1/user/quota 误读成额度时定的;
+# 实际是每分钟 20 次的速率限制,web() 已按 3.2 秒/次节流。只看 2 个条目时,对的那个排第 3
+# 以后就永远轮不到(《汉娜姐妹》:前 2 名一个只有繁体、一个 0 文件,简中排第 3–5)。
+ap.add_argument("--probe", type=int, default=6,
+                help="每部片最多看几个 assrt 条目(每个条目 1 次详情 + 至多 2 次下载)")
 ap.add_argument("--sections", default="1,2")
 args = ap.parse_args()
 
-CFG = json.load(io.open("/config/settings.json", encoding="utf-8"))
+CFG = json.load(io.open(SETTINGS, encoding="utf-8"))
 BASE = CFG["Plex server address"]
 TOK = os.environ.get("PLEX_TOKEN") or CFG["Plex users"][0][1]
 K = json.load(io.open(KEYS, encoding="utf-8"))
@@ -209,8 +217,14 @@ def assrt_files(sub_id):
         return []
     try:
         s = ((json.loads(b).get("sub") or {}).get("subs") or [{}])[0]
-        return [(f.get("f"), f.get("url")) for f in (s.get("filelist") or [])
-                if f.get("url") and str(f.get("f", "")).lower().endswith((".srt", ".ass", ".ssa"))]
+        files = [(f.get("f"), f.get("url")) for f in (s.get("filelist") or [])
+                 if f.get("url") and str(f.get("f", "")).lower().endswith(SUB_EXT)]
+        # 只有压缩包条目才有 filelist;单个字幕文件直接上传的条目,文件就是条目本身
+        # (filename + url)。原来只看 filelist,这类条目一律算 0 个文件 ——
+        # 《汉娜姐妹》唯一对版的 BluRay 简中(CtrlHD.chs.srt)就是这么漏的。
+        if not files and s.get("url") and str(s.get("filename") or "").lower().endswith(SUB_EXT):
+            files = [(s["filename"], s["url"])]
+        return files
     except Exception:
         return []
 
@@ -313,6 +327,10 @@ def main():
             for fn, url in assrt_files(sid):
                 if ep and not re.search(r"(?<![0-9])S0*%dE0*%d(?![0-9])" % ep, fn, re.I):
                     continue
+                # 分段字幕的两段末条时间彼此接近,会互相"佐证"成共识,把半部字幕当整部传上去
+                if SPLIT_RE.search(fn):
+                    why_fail["分段字幕"] = why_fail.get("分段字幕", 0) + 1
+                    continue
                 # 合集条目(如"哈利波特1-8部合集")里装着多部电影的字幕,逐个文件验片名
                 if not same_film(fn, titles):
                     continue
@@ -337,7 +355,9 @@ def main():
                 if c[-1] > dur + 5:
                     why_fail["末条超片长"] = why_fail.get("末条超片长", 0) + 1
                     continue
-                probed.append({"rank": max(rank, lang_rank("", fn)), "name": fn, "vn": vn,
+                # 文件名上的语言标记比条目的 lang.desc 可靠:条目常写"英 简 繁",里面却只装
+                # 一个 .cht.srt(《汉娜姐妹》605590)。原来取两者较大值,繁体文件被当成简中。
+                probed.append({"rank": lang_rank("", fn) or rank, "name": fn, "vn": vn,
                                "n": len(c), "first": c[0], "last": c[-1],
                                "text": txt, "enc": enc})
         if not probed:
@@ -356,9 +376,11 @@ def main():
         # 只有一个候选时没有佐证可依,退回一条宽松的绝对闸:末条不得早于片长的 75%。
         # 实测《办公室 S05E21》:片长 33 分(加长版),而唯一候选是 21 分的电视播出版字幕,
         # 差了 36% —— 共识机制在样本量为 1 时形同虚设,必须有这道兜底。
-        if votes == 1 and (dur - truth) > dur * 0.25:
-            log("NOFIX", "%s -> 仅 1 个候选且末条距片尾 %.0fs(%.0f%%),无佐证,不采用"
-                % (head, dur - truth, 100.0 * (dur - truth) / dur))
+        # 现在每部看 6 个条目,两份同样残缺的字幕(别的剪辑版、分段)互相佐证的机会变大,
+        # 所以这道闸不论票数都要过:整部片的字幕末条不可能离片尾超过四分之一。
+        if (dur - truth) > dur * 0.25:
+            log("NOFIX", "%s -> %d 个候选的末条都在片尾前 %.0fs(%.0f%%),像分段或别的剪辑版,不采用"
+                % (head, votes, dur - truth, 100.0 * (dur - truth) / dur))
             done += 1
             continue
         w = max(agree, key=lambda p: (p["rank"], p["n"]))
