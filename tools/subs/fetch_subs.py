@@ -42,7 +42,7 @@ ap.add_argument("--only", default="")
 ap.add_argument("--rk", default="", help="只处理这些 ratingKey(逗号分隔)")
 ap.add_argument("--limit", type=int, default=5)
 # 原来默认 2、注释写"下载是稀缺资源别调大" —— 那是把 /v1/user/quota 误读成额度时定的;
-# 实际是每分钟 20 次的速率限制,web() 已按 3.2 秒/次节流。只看 2 个条目时,对的那个排第 3
+# 实际是按分钟的速率限制(见 PACE),web() 已按它节流。只看 2 个条目时,对的那个排第 3
 # 以后就永远轮不到(《汉娜姐妹》:前 2 名一个只有繁体、一个 0 文件,简中排第 3–5)。
 ap.add_argument("--probe", type=int, default=6,
                 help="每部片最多看几个 assrt 条目(每个条目 1 次详情 + 至多 2 次下载)")
@@ -83,13 +83,28 @@ def px(method, path, body=None, ctype=None, js=True, timeout=180):
 
 
 def web(url, timeout=60):
-    paced()
-    try:
-        r = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(r, timeout=timeout) as resp:
-            return resp.status, resp.read()
-    except Exception:
-        return 0, b""
+    """返回 (HTTP 状态, 字节)。assrt 超限(RATE_CODES)时等 RATE_WAIT 秒重试,共 RATE_TRIES 次,
+    每次记一行 RATE;其它 HTTP 错误如实返回状态码,连不上返回 0。
+    原来 `except Exception` 把 HTTPError 也吞成 0,下载处那段"遇 402 等 30 秒"从来走不到,
+    限流全被记成"下载失败"/"无匹配文件"(2026-10-31 重跑 46 条,前 19 条全是这样)。"""
+    code = 0
+    for i in range(RATE_TRIES):
+        paced()
+        try:
+            r = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(r, timeout=timeout) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as e:
+            code = e.code
+            if code not in RATE_CODES:
+                return code, b""
+            log("RATE", "assrt 超限(HTTP %d),第 %d/%d 次%s" % (
+                code, i + 1, RATE_TRIES, ",等 %d 秒再试" % RATE_WAIT if i + 1 < RATE_TRIES else ",放弃这次请求"))
+            if i + 1 < RATE_TRIES:
+                time.sleep(RATE_WAIT)
+        except Exception:
+            return 0, b""
+    return code, b""
 
 
 def toks(s):
@@ -187,13 +202,17 @@ def assrt_search(query):
 
 
 _last = [0.0]
+# assrt 按分钟限速(不是每日额度 —— /v1/user/quota 返回的是当前这一分钟的剩余请求数)。
+# 早先实测 20 次/分钟、超了回 402;2026-10-31 实测**每分钟 5 次**(空闲 3 分钟剩余数一直停在 5,
+# 详情与下载都计数、查配额不计),超了回 **509** `{"status":30900,"errmsg":"you are exceeding request limits"}`。
+PACE = 12.5               # 秒/次,对应 4.8 次/分钟
+RATE_CODES = (402, 509)
+RATE_WAIT, RATE_TRIES = 60, 3
 
 
 def paced():
-    """assrt 是 **20 次/分钟**的速率限制(不是每日额度 —— 我一开始读错了,
-    /v1/user/quota 返回的是当前这一分钟的剩余请求数)。超了会返回 402。
-    按 3 秒一次节流,稳稳压在限额内。"""
-    d = 3.2 - (time.time() - _last[0])
+    """按 PACE 节流。只管本进程;监听器和手动重跑同时跑时靠 web() 的超限重试兜住。"""
+    d = PACE - (time.time() - _last[0])
     if d > 0:
         time.sleep(d)
     _last[0] = time.time()
@@ -254,8 +273,7 @@ def items():
 
 def main():
     done = 0
-    print("assrt 本分钟剩余请求数: %s(限额 20 次/分钟,已按 3.2 秒/次节流)"
-          % (assrt_quota() if True else "?"))
+    print("assrt 本分钟剩余请求数: %s(已按 %.1f 秒/次节流)" % (assrt_quota(), PACE))
     keep = set(x for x in args.rk.split(",") if x)
     for rk in items():
         if keep and str(rk) not in keep:
@@ -337,12 +355,9 @@ def main():
                 files.append((fn, url))
             for fn, url in files[:2]:
                 st2, raw = web(url)
-                if st2 == 402:
-                    log("RATE", "撞到 assrt 速率上限,等 30 秒再继续")
-                    time.sleep(30)
-                    st2, raw = web(url)
                 if st2 != 200 or not raw:
-                    why_fail["下载失败"] = why_fail.get("下载失败", 0) + 1
+                    k = "限流" if st2 in RATE_CODES else "下载失败"
+                    why_fail[k] = why_fail.get(k, 0) + 1
                     continue
                 txt, enc = decode(raw)
                 if not txt:

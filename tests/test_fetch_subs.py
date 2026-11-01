@@ -85,11 +85,14 @@ def fake_web(url, timeout=60):
         return 200, json.dumps({"sub": {"subs": W["search"]}}).encode()
     if u.path.endswith("/sub/detail"):
         return 200, json.dumps({"sub": {"subs": [W["detail"][int(q["id"][0])]]}}).encode()
+    if url in W.get("codes", {}):
+        return W["codes"][url], b""
     if url in W["files"]:
         return 200, W["files"][url]
     return 404, b""
 
 
+REAL_WEB = G.web
 G.px, G.web, G.assrt_quota = fake_px, fake_web, (lambda: 20)
 
 SIMP, TRAD = "这是简体中文字幕", "這是繁體中文字幕"
@@ -164,6 +167,75 @@ lt = run({
 })
 check("没有上传", UPLOADS == [], str([n for n, _ in UPLOADS]))
 check("记 NOFIX", "NOFIX" in lt, lt.strip()[-140:])
+
+print("四、下载被限流(509):记「限流」,不记「下载失败」")
+lt = run({
+    "search": [{"id": 315383, "videoname": CTRL.replace(".", " "), "lang": None}],
+    "detail": {315383: {"filename": CTRL + ".chs.srt", "url": "http://dl/ctrl1", "filelist": []}},
+    "files": {}, "codes": {"http://dl/ctrl1": 509},
+})
+check("没有上传", UPLOADS == [])
+check("NONE 行写的是限流", "限流" in lt and "下载失败" not in lt, lt.strip()[-140:])
+
+print("五、web() 本身:509 重试、其它错误不重试(2026-10-31 起 assrt 超限回 509,原代码把它吞成 0)")
+import urllib.error as UE
+
+
+class FakeTime(object):
+    def __init__(self):
+        self.slept = []
+
+    def sleep(self, x):
+        self.slept.append(x)
+
+    def __getattr__(self, k):
+        return getattr(REAL_TIME, k)
+
+
+class Resp(object):
+    status = 200
+
+    def read(self):
+        return b"ok"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def scripted(codes):
+    seq = list(codes)
+
+    def urlopen(req, timeout=60):
+        c = seq.pop(0)
+        if c == 200:
+            return Resp()
+        raise UE.HTTPError("http://x", c, "x", {}, None)
+    return urlopen
+
+
+import time as REAL_TIME
+real_open, real_paced = G.urllib.request.urlopen, G.paced
+G.paced = lambda: None
+for label, codes, want, sleeps, rates in (
+        ("509 两次后成功", [509, 509, 200], 200, 2, 2),
+        ("402 也算超限", [402, 200], 200, 1, 1),
+        ("一直 509:3 次后放弃并返回 509", [509, 509, 509], 509, 2, 3),
+        ("404 不重试,如实返回 404", [404], 404, 0, 0)):
+    G.time = FakeTime()
+    G.urllib.request.urlopen = scripted(codes)
+    if os.path.exists(LOG):
+        os.remove(LOG)
+    try:
+        st, b = REAL_WEB("http://api/x")
+    finally:
+        G.urllib.request.urlopen = real_open
+    lt = io.open(LOG, encoding="utf-8").read() if os.path.exists(LOG) else ""
+    check(label, st == want and len(G.time.slept) == sleeps and lt.count("RATE") == rates,
+          "st=%s sleep=%s RATE=%d" % (st, G.time.slept, lt.count("RATE")))
+G.time, G.paced = REAL_TIME, real_paced
 
 print("\n%s" % ("全部通过" if not fails else "失败 %d 项: %s" % (len(fails), "、".join(fails))))
 sys.exit(1 if fails else 0)
