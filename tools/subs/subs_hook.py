@@ -72,23 +72,45 @@ def log(kind, msg):
     sys.stdout.flush()
 
 
-def cfg():
-    if _cfg[0] is None:
+class PlexAuthError(Exception):
+    """Plex 拒绝了令牌(401),重读 settings.json 之后仍被拒。"""
+
+
+def cfg(reload=False):
+    """令牌取 settings.json 的 `Plex users`(pd_zurg 本身用的就是这一个),缓存住;
+    px() 遇到 401 会让它重读一次。
+
+    原来只在第一次用到时读、之后永不刷新:10-28 服务器令牌作废换新,settings.json 跟着
+    改了,常驻的本服务却一直拿旧令牌 —— 每个请求 401,而 px() 把 401 当成"没数据",
+    ready() 于是报「Plex 还没分析完」,每部空等 20 分钟后跳过,整条队列堵死
+    (10-31 实撞,重启服务才恢复)。"""
+    if _cfg[0] is None or reload:
         c = json.load(io.open(CFG_PATH, encoding="utf-8"))
         _cfg[0] = (PLEX_HOST_URL, os.environ.get("PLEX_TOKEN") or c["Plex users"][0][1])
     return _cfg[0]
 
 
 def px(path, timeout=60):
-    base, tok = cfg()
-    u = "%s%s%sX-Plex-Token=%s" % (base, path, "&" if "?" in path else "?", tok)
-    r = urllib.request.Request(u, headers={"Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(r, timeout=timeout) as resp:
-            b = resp.read()
-            return json.loads(b)["MediaContainer"] if b.strip() else {}
-    except Exception:
-        return {}
+    """查 Plex。读不到返回 {},调用方当"还没就绪"继续等 —— **唯独 401 不能这么当**:
+    令牌错了等多久都不会就绪。先重读 settings.json 再试一次,仍 401 就抛 PlexAuthError。"""
+    for attempt in (0, 1):
+        base, tok = cfg(reload=attempt > 0)
+        u = "%s%s%sX-Plex-Token=%s" % (base, path, "&" if "?" in path else "?", tok)
+        r = urllib.request.Request(u, headers={"Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(r, timeout=timeout) as resp:
+                b = resp.read()
+                return json.loads(b)["MediaContainer"] if b.strip() else {}
+        except urllib.error.HTTPError as e:
+            if e.code != 401:
+                return {}
+        except Exception:
+            return {}
+    src = ("环境变量 PLEX_TOKEN" if os.environ.get("PLEX_TOKEN")
+           else "%s 的 Plex users" % CFG_PATH)
+    raise PlexAuthError("Plex 拒绝了令牌(401;来自 %s,已重读一次仍被拒)。把 Plex 的 "
+                        "Preferences.xml 里的 PlexOnlineToken 写进去,本服务下一个请求就会"
+                        "自动重读,不用重启" % src)
 
 
 def load_seen():
@@ -151,11 +173,15 @@ def enqueue(rks, recheck, force, why, title):
 
 def expand(rk, typ):
     """剧集的事件可能报在剧/季上,展开成单集 —— 字幕是按集配的。"""
-    if typ == "show":
-        d = px("/library/metadata/%s/allLeaves" % rk)
-    elif typ == "season":
-        d = px("/library/metadata/%s/children" % rk)
-    else:
+    try:
+        if typ == "show":
+            d = px("/library/metadata/%s/allLeaves" % rk)
+        elif typ == "season":
+            d = px("/library/metadata/%s/children" % rk)
+        else:
+            return [str(rk)]
+    except PlexAuthError as e:
+        log("AUTH", "rk=%s 展开不了单集:%s" % (rk, e))
         return [str(rk)]
     out = [str(m["ratingKey"]) for m in (d.get("Metadata") or []) if m.get("ratingKey")]
     return out or [str(rk)]
@@ -194,7 +220,11 @@ def in_container(script, rk, extra=()):
 
 
 def handle(rk, recheck=False, why="入库"):
-    md = ready(rk)
+    try:
+        md = ready(rk)
+    except PlexAuthError as e:
+        log("AUTH", "rk=%s 没处理:%s" % (rk, e))
+        return
     if md is None:
         log("SKIP", "rk=%s 等了 %d 分钟 Plex 还没分析完,放弃(下次入库事件会再来)"
             % (rk, int(READY_TRIES * READY_WAIT / 60)))
