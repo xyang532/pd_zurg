@@ -126,6 +126,18 @@ NOISE = {"bluray", "blu", "ray", "webrip", "web", "dl", "hdrip", "brrip", "dvdri
 CUT = re.compile(r"[.\s_\-\[(]((19|20)\d{2}|S\d{1,2}(E\d{1,3})?)([.\s_\-\])]|$)", re.I)
 
 
+def dedup_queries(queries):
+    """去掉只差大小写、点号、空格、下划线的重复搜索词(保序)。文件名切出的
+    `Hannah.and.Her.Sisters` 和原名 `Hannah and Her Sisters` 原来各搜一次,白花一次限额。"""
+    out, seen = [], set()
+    for q in queries:
+        k = re.sub(r"[\s._]+", " ", q).strip().lower()
+        if k and k not in seen:
+            seen.add(k)
+            out.append(q.strip())
+    return out
+
+
 def clean_title(fname):
     """从发布名里切出真正的片名 —— 年份或 SxxExx 之前的部分。
 
@@ -322,11 +334,19 @@ def main():
                        "%s S%02d" % (show, ep[0]), show]
             titles = [t for t in (show, md.get("originalTitle"), clean_title(fname)) if t]
         else:
-            queries = ["%s %s" % (t, md.get("year") or "") for t in
-                       (clean_title(fname), md.get("originalTitle"), md.get("title")) if t]
+            y = md.get("year")
+            names = [t for t in (clean_title(fname), md.get("originalTitle"), md.get("title")) if t]
+            queries = ["%s %s" % (t, y or "") for t in names]
+            # 年份 ±1:Plex 记的年份(常是上映年)和字幕站条目标的年份(常是首映/版权年)可差一年,
+            # 搜索词带年份就漏掉整组条目。《第一头牛》Plex 记 2020,assrt 上唯一带简体 srt 的
+            # FGT BluRay 条目标 2019,原来三个搜索词都没捞到它。只用一个片名加,限额(见 PACE)贵。
+            if y and names:
+                alt = md.get("originalTitle") or names[0]
+                queries += ["%s %d" % (alt, int(y) + d) for d in (-1, 1)]
+        queries = dedup_queries(queries)
         seen_ids, cands = set(), []
         for q in queries:
-            for s in assrt_search(q.strip()):
+            for s in assrt_search(q):
                 sid = s.get("id")
                 vn = str(s.get("videoname") or s.get("native_name") or "")
                 # 条目名常常是垃圾(实测有个条目就叫 "BluRay",里面却装着 79 个正确命名的文件),

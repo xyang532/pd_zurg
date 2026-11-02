@@ -8,7 +8,7 @@
 放宽到多看几个条目之后,又要防两种残缺字幕互相"佐证":CD1/CD2 分段、别的剪辑版。
 下面的条目形状照抄 assrt 实际返回的那几个(id、文件名、有无 filelist)。
 """
-import io, json, os, sys, tempfile
+import io, json, os, re, sys, tempfile
 import importlib.util
 import urllib.parse
 
@@ -59,6 +59,7 @@ def srt(n, last, line):
 
 W = {}   # 当前场景:search 返回的条目、各条目详情、各下载地址的字节
 UPLOADS = []
+QUERIES = []   # 本场景发出的 assrt 搜索词
 
 
 def fake_px(method, path, body=None, ctype=None, js=True, timeout=180):
@@ -82,7 +83,12 @@ def fake_web(url, timeout=60):
     u = urllib.parse.urlparse(url)
     q = urllib.parse.parse_qs(u.query)
     if u.path.endswith("/sub/search"):
-        return 200, json.dumps({"sub": {"subs": W["search"]}}).encode()
+        QUERIES.append(q["q"][0])
+        hits = list(W["search"])
+        for year, extra in W.get("search_by_year", {}).items():
+            if year in q["q"][0]:
+                hits += extra
+        return 200, json.dumps({"sub": {"subs": hits}}).encode()
     if u.path.endswith("/sub/detail"):
         return 200, json.dumps({"sub": {"subs": [W["detail"][int(q["id"][0])]]}}).encode()
     if url in W.get("codes", {}):
@@ -105,6 +111,7 @@ def run(scene):
     W.clear()
     W.update(scene)
     del UPLOADS[:]
+    del QUERIES[:]
     if os.path.exists(LOG):
         os.remove(LOG)
     G.main()
@@ -179,6 +186,19 @@ for code, want in ((509, "限流"), (402, "拒绝下载(402)")):
     check("下载 %d:没有上传" % code, UPLOADS == [])
     check("下载 %d:NONE 行写「%s」" % (code, want), (want + "×1") in lt and "下载失败" not in lt,
           lt.strip()[-140:])
+
+print("六、对版条目只标了差一年(Plex 1986,条目 1985):靠年份 ±1 搜到;同义搜索词只发一次")
+lt = run({
+    "search": [],
+    "search_by_year": {"1985": [{"id": 315383, "videoname": CTRL.replace(".", " ").replace("1986", "1985"),
+                                 "lang": None}]},
+    "detail": {315383: {"filename": CTRL + ".chs.srt", "url": "http://dl/ctrl1", "filelist": []}},
+    "files": {"http://dl/ctrl1": srt(3020, 6210, SIMP)},
+})
+check("传了差一年条目里的简中", [n for n, _ in UPLOADS] == [CTRL + ".chs.srt"], str([n for n, _ in UPLOADS]))
+check("搜了 1985 和 1987", any("1985" in q for q in QUERIES) and any("1987" in q for q in QUERIES), str(QUERIES))
+norm = [re.sub(r"[\s._]+", " ", q).lower() for q in QUERIES]
+check("没有重复搜索词(点号/空格版只发一次)", len(norm) == len(set(norm)) and len(QUERIES) == 4, str(QUERIES))
 
 print("五、web() 本身:509 重试、其它错误不重试(2026-10-31 起 assrt 超限回 509,原代码把它吞成 0)")
 import urllib.error as UE
