@@ -201,6 +201,38 @@ def lang_rank(desc, filename):
     return 0
 
 
+SIMP_MARK = "们这个说会来时还对吗么没为过让给"
+TRAD_MARK = "們這個說會來時還對嗎麼沒為過讓給"
+
+
+def dialogue_text(txt):
+    """只留对白:ASS 取 Dialogue 行第 9 个逗号之后的部分(文件头、样式名都是英文单词,
+    会把纯中文 ASS 算成双语),SRT 去掉序号行和时间行;再去掉 {..} / <..> 标签。"""
+    if "Dialogue:" in txt:
+        lines = [l.split(",", 9)[9] for l in txt.splitlines()
+                 if l.startswith("Dialogue:") and l.count(",") >= 9]
+    else:
+        lines = [l for l in txt.splitlines()
+                 if l.strip() and "-->" not in l and not l.strip().isdigit()]
+    return re.sub(r"\{[^}]*\}|<[^>]*>", "", " ".join(lines)).replace("\\N", " ")
+
+
+def content_rank(txt, ntimes):
+    """按**内容**定语言档位(与 lang_rank 同档:3 双语 / 2 简中 / 1 繁中),不是中文回 0。
+    文件名和条目描述都不可靠:条目写"简 英"的包里常有纯英文文件,文件名不带语言标记时
+    原来就沿用条目的"简中";2026-11-01/02 因此把 11 份英文字幕当简中传上去并设为选中。
+    判据:汉字少于每条 2 个 = 不是中文(ntimes 是 cue_times 的时间戳个数,每条有起止两个);拉丁字母超过汉字的 0.8 倍 = 双语(繁体双语按繁中,
+    用户嫌繁体难读);简繁看常用对照字哪边多。"""
+    t = dialogue_text(txt)
+    han = len(re.findall(u"[\u4e00-\u9fff]", t))
+    if han < max(100, ntimes):
+        return 0
+    trad = sum(t.count(ch) for ch in TRAD_MARK) > sum(t.count(ch) for ch in SIMP_MARK)
+    if trad:
+        return 1
+    return 3 if len(re.findall(r"[A-Za-z]", t)) > han * 0.8 else 2
+
+
 def assrt_search(query):
     u = "https://api.assrt.net/v1/sub/search?%s" % urllib.parse.urlencode(
         {"token": ASSRT, "q": query, "cnt": 15})
@@ -397,9 +429,14 @@ def main():
                 if c[-1] > dur + 5:
                     why_fail["末条超片长"] = why_fail.get("末条超片长", 0) + 1
                     continue
-                # 文件名上的语言标记比条目的 lang.desc 可靠:条目常写"英 简 繁",里面却只装
-                # 一个 .cht.srt(《汉娜姐妹》605590)。原来取两者较大值,繁体文件被当成简中。
-                probed.append({"rank": lang_rank("", fn) or rank, "name": fn, "vn": vn,
+                # 语言以内容为准(content_rank)。条目的 lang.desc 和文件名都只用来给条目排序:
+                # 条目写"英 简 繁"却只装一个 .cht.srt(《汉娜姐妹》605590);条目写"简 英"的包里
+                # 装着纯英文 .eng.srt / 不带语言标记的 .srt(《办公室》S07–S09,11 份被当简中传上去)。
+                cr = content_rank(txt, len(c))
+                if not cr:
+                    why_fail["内容不是中文"] = why_fail.get("内容不是中文", 0) + 1
+                    continue
+                probed.append({"rank": cr, "name": fn, "vn": vn,
                                "n": len(c), "first": c[0], "last": c[-1],
                                "text": txt, "enc": enc})
         if not probed:

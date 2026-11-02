@@ -200,6 +200,46 @@ check("搜了 1985 和 1987", any("1985" in q for q in QUERIES) and any("1987" i
 norm = [re.sub(r"[\s._]+", " ", q).lower() for q in QUERIES]
 check("没有重复搜索词(点号/空格版只发一次)", len(norm) == len(set(norm)) and len(QUERIES) == 4, str(QUERIES))
 
+print("七、语言看内容:条目写「简 英」,包里的 .eng.srt 和不带语言标记的 .srt 都是英文 → 不能传")
+ENG = "This is an English subtitle line"
+OFF = "The.Office.S07E21.HDTV.XviD-LOL"
+lt = run({
+    "search": [{"id": 9, "videoname": "Hannah and Her Sisters 1986 BluRay", "lang": {"desc": "简 英"}}],
+    "detail": {9: {"filename": "x.rar", "url": "http://dl/9",
+                   "filelist": [{"f": "Hannah.and.Her.Sisters.1986.eng.srt", "url": "http://dl/eng"},
+                                {"f": "Hannah.and.Her.Sisters.1986.BluRay.srt", "url": "http://dl/plain"}]}},
+    "files": {"http://dl/eng": srt(1500, 6210, ENG), "http://dl/plain": srt(1500, 6205, ENG)},
+})
+check("英文没传", UPLOADS == [], str([n for n, _ in UPLOADS]))
+check("NONE 写「内容不是中文×2」", "内容不是中文×2" in lt, lt.strip()[-140:])
+
+print("八、内容定档:纯中文 ASS 记简中(文件头英文不算双语),中英双语 srt 记双语并优先")
+def ass(n, last, line):
+    head = "[Script Info]\nTitle: Default Aegisub file\nScriptType: v4.00+\n[V4+ Styles]\n" \
+           "Style: Default,Microsoft YaHei,20,&H00FFFFFF,&H000000FF,0,0,0,0,100,100,0,0,1,2,1,2,10,10,10,1\n[Events]\n"
+    def ts(x):
+        return "%d:%02d:%02d.%02d" % (x // 3600, x % 3600 // 60, x % 60, int(x * 100) % 100)
+    rows = []
+    for i in range(n):
+        a = 36 + (last - 36) * i / float(n - 1)
+        rows.append("Dialogue: 0,%s,%s,Default,,0,0,0,,{\\fad(100,100)}%s" % (ts(a), ts(a + 1.5), line))
+    return (head + "\n".join(rows)).encode("utf-8")
+lt = run({
+    "search": [{"id": 21, "videoname": CTRL.replace(".", " "), "lang": {"desc": "简"}}],
+    "detail": {21: {"filename": CTRL + ".chs.ass", "url": "http://dl/ass", "filelist": []}},
+    "files": {"http://dl/ass": ass(1500, 6210, SIMP)},
+})
+check("纯中文 ASS 传了且记简中", len(UPLOADS) == 1 and "简中" in lt and "双语" not in lt, lt.strip()[-140:])
+BIL = SIMP + "\\NThis is the English line of the same cue"
+lt = run({
+    "search": [{"id": 22, "videoname": CTRL.replace(".", " "), "lang": {"desc": "简"}},
+               {"id": 23, "videoname": CTRL.replace(".", " ") + " eng", "lang": {"desc": "简"}}],
+    "detail": {22: {"filename": CTRL + ".chs.srt", "url": "http://dl/s1", "filelist": []},
+               23: {"filename": CTRL + ".srt", "url": "http://dl/s2", "filelist": []}},
+    "files": {"http://dl/s1": srt(1500, 6210, SIMP), "http://dl/s2": srt(1500, 6212, BIL.replace("\\N", "\n"))},
+})
+check("双语优先", [n for n, _ in UPLOADS] == [CTRL + ".srt"] and "双语" in lt, str([n for n, _ in UPLOADS]) + " " + lt.strip()[-80:])
+
 print("五、web() 本身:509 重试、其它错误不重试(2026-10-31 起 assrt 超限回 509,原代码把它吞成 0)")
 import urllib.error as UE
 
