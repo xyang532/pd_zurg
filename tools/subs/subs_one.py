@@ -47,11 +47,14 @@ def subs_of(rk):
     d = hook.px("/library/metadata/%s" % rk)
     md = (d.get("Metadata") or [{}])[0]
     out = []
-    for m in md.get("Media") or []:
+    media = md.get("Media") or []
+    for mi, m in enumerate(media):
+        # 多版本条目每个版本有自己的字幕列表和选中,分开标,否则"选中 2 条"看着像出错
+        ver = ("第%d版 %s" % (mi + 1, m.get("videoCodec") or "?")) if len(media) > 1 else ""
         for pt in m.get("Part") or []:
             for s in pt.get("Stream") or []:
                 if s.get("streamType") == 3:
-                    out.append({"id": s.get("id"), "ext": bool(s.get("key")),
+                    out.append({"id": s.get("id"), "ext": bool(s.get("key")), "ver": ver,
                                 "sel": bool(s.get("selected")),
                                 "lang": s.get("language") or s.get("languageCode") or "?",
                                 "title": (s.get("title") or "")[:28]})
@@ -62,11 +65,14 @@ def show_subs(tag, rows):
     if not rows:
         print("    %s: 一条字幕轨都没有" % tag)
         return
-    print("    %s: %d 条,选中 %d 条" % (tag, len(rows), sum(1 for r in rows if r["sel"])))
+    nver = len(set(r["ver"] for r in rows))
+    print("    %s: %d 条,选中 %d 条%s" % (tag, len(rows), sum(1 for r in rows if r["sel"]),
+                                     "(%d 个版本各自选中)" % nver if nver > 1 else ""))
     for r in rows:
-        print("      id=%-6s %s %s %-8s %s"
+        print("      id=%-6s %s %s %-8s %s%s"
               % (r["id"], "外挂" if r["ext"] else "内嵌",
-                 "★选中" if r["sel"] else "  ", r["lang"], r["title"]))
+                 "★选中" if r["sel"] else "  ", r["lang"], r["title"],
+                 ("  [%s]" % r["ver"]) if r["ver"] else ""))
 
 
 def main():

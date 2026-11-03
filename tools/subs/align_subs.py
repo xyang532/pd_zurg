@@ -427,6 +427,7 @@ def main():
             nmedia = len(md.get("Media") or [])
             for mi, m in enumerate(md.get("Media") or []):
                 vtag = (" 第%d版" % (mi + 1)) if nmedia > 1 else ""
+                who = "%s%s" % (name[:30], vtag)
                 # 多版本条目:每个版本按**自己的**片长取窗口、算漂移(剪辑版长短可以不同)
                 vdur = (m.get("duration") or 0) / 1000.0 or dur
                 for p in m.get("Part") or []:
@@ -443,7 +444,7 @@ def main():
                         continue
                     path = host_path(p.get("file") or "")
                     if not os.path.exists(path):
-                        log("SKIP", "%s -> 文件不在:%s" % (name[:30], path[:60]))
+                        log("SKIP", "%s -> 文件不在:%s" % (who, path[:60]))
                         state[key] = {"result": "nofile"}
                         done += 1
                         continue
@@ -452,26 +453,26 @@ def main():
                         # 而不是被"量过了"挡在门外。重试的代价只有 64KB 一次读。
                         log("DEAD", "%s -> 片源文件读不出字节(RD 侧死档,不是字幕问题;"
                                     "归 rd_autoheal 换源):%s"
-                            % (name[:30], os.path.basename(path)[:60]))
+                            % (who, os.path.basename(path)[:60]))
                         done += 1
                         continue
                     refs = ref_track(streams)
                     if not refs:
                         log("NOREF", "%s -> 片源没有可用的参照字幕轨(只有 vobsub/forced 或全无)"
-                            % name[:36])
+                            % who)
                         state[key] = {"result": "noref"}
                         done += 1
                         continue
                     st2, b = px("GET", "/library/streams/%s?download=1" % target["id"], js=False)
                     if st2 != 200 or not b:
-                        log("SKIP", "%s -> 取不到外挂字幕内容 HTTP %s" % (name[:30], st2))
+                        log("SKIP", "%s -> 取不到外挂字幕内容 HTTP %s" % (who, st2))
                         done += 1
                         continue
                     text = b.decode("utf-8", "replace")
                     sub_cues = cue_starts(text)
                     wins = pick_windows(sub_cues, vdur)
                     if not wins:
-                        log("SKIP", "%s -> 字幕条数太少(%d),不足以定位" % (name[:30], len(sub_cues)))
+                        log("SKIP", "%s -> 字幕条数太少(%d),不足以定位" % (who, len(sub_cues)))
                         state[key] = {"result": "toofew"}
                         done += 1
                         continue
@@ -496,7 +497,7 @@ def main():
                             break
                     if not measured:
                         log("NOREF", "%s -> 参照轨里量不出可信峰值(窗口内 cue 太少或对不上)"
-                            % name[:36])
+                            % who)
                         state[key] = {"result": "nopeak"}
                         done += 1
                         continue
