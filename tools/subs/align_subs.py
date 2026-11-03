@@ -28,6 +28,9 @@ fix_subs / fetch_subs 那套共识判据只能否掉粗差(错片、错剪辑版
 import argparse, bisect, io, json, os, re, subprocess, sys, time
 import urllib.request, urllib.parse, urllib.error
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import upload_guard  # noqa: E402  上传前的版本/顶替规矩,和 fetch_subs 共用
+
 # ---- 路径:本工具跑在**宿主机**上(要用宿主机的 ffmpeg 和挂载盘),不在容器里 ----
 CFG_PATH = "/volume1/docker/pd_zurg/config/settings.json"
 LOG_PATH = "/volume1/docker/pd_zurg/log/subs.log"
@@ -421,7 +424,11 @@ def main():
             dur = (md.get("duration") or 0) / 1000.0
             if dur <= 0:
                 continue
-            for m in md.get("Media") or []:
+            nmedia = len(md.get("Media") or [])
+            for mi, m in enumerate(md.get("Media") or []):
+                vtag = (" 第%d版" % (mi + 1)) if nmedia > 1 else ""
+                # 多版本条目:每个版本按**自己的**片长取窗口、算漂移(剪辑版长短可以不同)
+                vdur = (m.get("duration") or 0) / 1000.0 or dur
                 for p in m.get("Part") or []:
                     if done >= args.limit:
                         break
@@ -462,7 +469,7 @@ def main():
                         continue
                     text = b.decode("utf-8", "replace")
                     sub_cues = cue_starts(text)
-                    wins = pick_windows(sub_cues, dur)
+                    wins = pick_windows(sub_cues, vdur)
                     if not wins:
                         log("SKIP", "%s -> 字幕条数太少(%d),不足以定位" % (name[:30], len(sub_cues)))
                         state[key] = {"result": "toofew"}
@@ -494,7 +501,7 @@ def main():
                         done += 1
                         continue
 
-                    head = "%s [%s轨#%d]" % (name[:30], used[1], used[0])
+                    head = "%s%s [%s轨#%d]" % (name[:30], vtag, used[1], used[0])
                     detail = "、".join("%.0fs处 %+.3fs(票%d/%.0f%%)%s"
                                       % (t, m[0], m[1], m[2] * 100, "" if solid(m) else "*")
                                       for t, m in measured)
@@ -524,7 +531,7 @@ def main():
                             done += 1
                             continue
                     # 判据是**整片累计**漂移,不是两窗口的差值 —— 后者不除以间距没有意义
-                    total_drift = abs(a - 1.0) * dur
+                    total_drift = abs(a - 1.0) * vdur
 
                     if total_drift <= DRIFT_TOL:
                         a, b_ = 1.0, (d1 + d2) / 2.0
@@ -559,9 +566,23 @@ def main():
                     up_title = title
                     if not up_title.lower().endswith((".srt", ".ass", ".ssa")):
                         up_title = "%s.%s" % (up_title, ext_name)
+                    # 回传会静默顶掉这个版本里同格式的**全部**外挂(upload_guard)。顶掉旧的这条
+                    # 正是目的;同格式还有别的(可能是用户自己传/自己挑的)就不传,保持原样。
+                    hit = upload_guard.clobbered(streams, ext_name, keep=target["id"])
+                    if hit:
+                        log("SKIP", "%s -> 要改:%s,但回传会顶掉这个版本的同格式外挂字幕(%s),不动;%s"
+                            % (head, fix_desc, upload_guard.describe(hit), detail))
+                        state[key] = {"result": "clobber"}
+                        done += 1
+                        continue
                     before = set(str(s.get("id")) for s in streams
                                  if s.get("streamType") == 3 and s.get("key"))
-                    q = urllib.parse.urlencode({"title": up_title, "format": ext_name})
+                    # 带 mediaItemID:不带就落到第一个版本 —— 对的是第二版的字幕时,会把第一版的
+                    # 同格式字幕顶掉,第二版的旧字幕随后又被下面删掉,两头都错
+                    params = {"title": up_title, "format": ext_name}
+                    if m.get("id") is not None:
+                        params["mediaItemID"] = m["id"]
+                    q = urllib.parse.urlencode(params)
                     st3, _ = px("POST", "/library/metadata/%s/subtitles?%s" % (rk, q),
                                 body=new_text.encode("utf-8"),
                                 ctype="text/plain;charset=UTF-8", js=False)
@@ -579,6 +600,8 @@ def main():
                         m4 = (d4.get("Metadata") or [{}])[0]
                         for mm in m4.get("Media") or []:
                             for pp in mm.get("Part") or []:
+                                if str(pp.get("id")) != str(p.get("id")):
+                                    continue   # 只认这个版本上冒出来的新流
                                 for ss in pp.get("Stream") or []:
                                     if (ss.get("streamType") == 3 and ss.get("key")
                                             and str(ss.get("id")) not in before):

@@ -211,10 +211,14 @@ def run(cmd, tag):
         log("WARN", "%s 跑不起来: %s" % (tag, e))
 
 
+# 容器里的脚本会 import 的同目录模块,要跟着一起拷进去
+SHARED = ("upload_guard.py",)
+
+
 def in_container(script, rk, extra=()):
-    src = os.path.join(TOOLS, script)
     d = docker_cmd()
-    run(d + ["cp", src, "pd_zurg:/tmp/%s" % script], "cp %s" % script)
+    for f in (script,) + SHARED:
+        run(d + ["cp", os.path.join(TOOLS, f), "pd_zurg:/tmp/%s" % f], "cp %s" % f)
     run(d + ["exec", "pd_zurg", "/venv/bin/python3", "/tmp/%s" % script,
              "--rk", rk, "--apply"] + list(extra), script)
 
@@ -238,7 +242,9 @@ def handle(rk, recheck=False, why="入库"):
         % (why, name[:40], rk, "(强制重量)" if recheck else ""))
     in_container("fix_subs.py", rk, ["--mode", "missing"])
     in_container("fetch_subs.py", rk)
-    align = ["--rk", rk, "--apply", "--limit", "1"]
+    # --limit 按版本(Part)计:多版本条目每个版本的中文都要各对一次轴,写死 1 只会对第一个版本
+    nparts = sum(len(m.get("Part") or []) for m in md.get("Media") or []) or 1
+    align = ["--rk", rk, "--apply", "--limit", str(nparts)]
     if recheck:
         # 老片在 align_state.json 里已记"量过了",不加这个就整部被跳过
         align.append("--recheck")

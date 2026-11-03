@@ -51,7 +51,7 @@ if ! echo "$PS_OUT" | grep -qx pd_zurg; then
   exit 0
 fi
 
-for f in fix_subs.py fetch_subs.py fix_select.py align_subs.py; do
+for f in fix_subs.py fetch_subs.py fix_select.py align_subs.py upload_guard.py; do
   if [ ! -f "$TOOLS/$f" ]; then
     echo "$(stamp) ABORT    找不到 $TOOLS/$f" >> "$LOG"
     exit 1
@@ -60,10 +60,13 @@ done
 
 run_in_container() {
   _f=$1; shift
-  "$DOCKER" cp "$TOOLS/$_f" "pd_zurg:/tmp/$_f" >/dev/null 2>&1 || {
-    echo "$(stamp) ABORT    docker cp $_f 失败" >> "$LOG"
-    return 1
-  }
+  # upload_guard.py 是 fetch_subs 会 import 的同目录模块,跟着一起拷
+  for _c in "$_f" upload_guard.py; do
+    "$DOCKER" cp "$TOOLS/$_c" "pd_zurg:/tmp/$_c" >/dev/null 2>&1 || {
+      echo "$(stamp) ABORT    docker cp $_c 失败" >> "$LOG"
+      return 1
+    }
+  done
   "$DOCKER" exec pd_zurg /venv/bin/python3 "/tmp/$_f" "$@"
 }
 

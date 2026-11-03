@@ -21,6 +21,7 @@ import argparse, io, json, os, re, sys, time
 import urllib.request, urllib.parse, urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import upload_guard  # noqa: E402  上传前的版本/顶替规矩,和 align_subs 共用
 
 LOG_PATH = os.environ.get("SUBS_LOG", "/log/subs.log")
 KEYS = os.environ.get("SUBS_KEYS", "/config/subs_keys.json")
@@ -321,6 +322,84 @@ def items():
             yield it["ratingKey"]
 
 
+def sub_ext(name):
+    return os.path.splitext(name)[1].lstrip(".").lower() or "srt"
+
+
+def need_versions(md):
+    """这个条目里**缺中文的版本**。一个版本 = 一个 Media(其下所有 Part 的字幕合起来看)。"""
+    out = []
+    for i, m in enumerate(md.get("Media") or []):
+        streams, fname = [], ""
+        for p in m.get("Part") or []:
+            fname = os.path.basename(p.get("file") or "") or fname
+            streams += [s for s in (p.get("Stream") or []) if s.get("streamType") == 3]
+        # **上传上去的字幕 lang 常是 None**(标题里不带 .zh 之类标记时 Plex 不打语言),只看 is_zh
+        # 会认不出自己传的,每跑一轮就重传一份(实测把《X圣治》传成了 3 条)。
+        # 外挂且语言未知的一律当"已有",宁可漏补也不制造重复。
+        if any(is_zh(s) or (s.get("key") and not (s.get("language") or "").strip())
+               for s in streams):
+            continue
+        out.append({"mid": m.get("id"), "idx": i + 1, "codec": m.get("videoCodec") or "?",
+                    "dur": (m.get("duration") or md.get("duration") or 0) / 1000.0,
+                    "fname": fname, "streams": streams})
+    return out
+
+
+def pick_and_upload(rk, head, v, probed):
+    """从这个条目共用的候选里,给版本 v 挑一份并上传到**这个版本**上。"""
+    vdur = v["dur"]
+    pool = [p for p in probed if p["last"] <= vdur + 5]
+    if not pool:
+        log("NONE", "%s -> %d 份可用字幕的末条都超过这个版本的片长 %.0fs"
+            % (head, len(probed), vdur))
+        return
+    truth, votes = consensus([p["last"] for p in pool])
+    agree = [p for p in pool if abs(p["last"] - truth) <= 60.0]
+    if not agree:
+        log("NOFIX", "%s -> %d 个候选彼此不一致" % (head, len(pool)))
+        return
+    # 只有一个候选时没有佐证可依,退回一条宽松的绝对闸:末条不得早于片长的 75%。
+    # 实测《办公室 S05E21》:片长 33 分(加长版),而唯一候选是 21 分的电视播出版字幕,
+    # 差了 36% —— 共识机制在样本量为 1 时形同虚设,必须有这道兜底。
+    # 现在每部看 6 个条目,两份同样残缺的字幕(别的剪辑版、分段)互相佐证的机会变大,
+    # 所以这道闸不论票数都要过:整部片的字幕末条不可能离片尾超过四分之一。
+    if (vdur - truth) > vdur * 0.25:
+        log("NOFIX", "%s -> %d 个候选的末条都在片尾前 %.0fs(%.0f%%),像分段或别的剪辑版,不采用"
+            % (head, votes, vdur - truth, 100.0 * (vdur - truth) / vdur))
+        return
+    # 上传会静默顶掉这个版本里**同格式**的已有外挂字幕(见 upload_guard)。只在不会顶掉
+    # 别人的候选里挑;对得上的全是那个格式,就不传 —— 那条可能是用户自己传的。
+    usable, hit = [], []
+    for p in agree:
+        h = upload_guard.clobbered(v["streams"], sub_ext(p["name"]))
+        if h:
+            hit += [s for s in h if s not in hit]
+        else:
+            usable.append(p)
+    if not usable:
+        log("SKIP", "%s -> %d 份对得上的字幕传上去都会顶掉这个版本已有的同格式外挂字幕(%s),不传"
+            % (head, len(agree), upload_guard.describe(hit)))
+        return
+    w = max(usable, key=lambda p: (p["rank"], p["n"]))
+    lang_desc = {3: "双语", 2: "简中", 1: "繁中", 0: "未知"}[w["rank"]]
+    detail = ("%s;%s %d 条,首 %.0fs,末 %.0fs(%d/%d 一致,距片尾 %.0fs,编码 %s)"
+              % (w["name"][:44], lang_desc, w["n"], w["first"], w["last"],
+                 votes, len(pool), vdur - w["last"], w["enc"]))
+    if not args.apply:
+        log("PLAN", "%s -> %s" % (head, detail))
+        return
+    params = {"title": w["name"], "format": sub_ext(w["name"])}
+    if v["mid"] is not None:
+        params["mediaItemID"] = v["mid"]   # 不带就落到第一个版本(upload_guard 第 1 条)
+    st3, _ = px("POST", "/library/metadata/%s/subtitles?%s" % (rk, urllib.parse.urlencode(params)),
+                body=w["text"].encode("utf-8"), ctype="text/plain;charset=UTF-8", js=False)
+    if st3 != 200:
+        log("FAIL", "%s -> 上传失败 HTTP %s" % (head, st3))
+        return
+    log("UPLOAD", "%s -> %s" % (head, detail))
+
+
 def main():
     done = 0
     print("assrt 本分钟剩余请求数: %s(已按 %.1f 秒/次节流)" % (assrt_quota(), PACE))
@@ -342,20 +421,23 @@ def main():
         dur = (md.get("duration") or 0) / 1000.0
         if dur <= 0:
             continue
-        subs, fname = [], ""
-        for m in md.get("Media") or []:
-            for p in m.get("Part") or []:
-                fname = os.path.basename(p.get("file") or "") or fname
-                subs += [s for s in (p.get("Stream") or []) if s.get("streamType") == 3]
-        # **上传上去的字幕 lang 是 None**(Plex 不给上传件打语言标记),所以只看 is_zh 会
-        # 认不出自己传的,每跑一轮就重传一份(实测把《X圣治》传成了 3 条)。
-        # 外挂且语言未知的一律当"已有",宁可漏补也不制造重复。
-        if [s for s in subs
-                if is_zh(s) or (s.get("key") and not (s.get("language") or "").strip())]:
+        # **按版本判、按版本传**。同一集挂两个文件(两个 Media)时,原来把所有版本的字幕合起来
+        # 判"已有中文",于是第一个版本有中文、第二个没有的情况永远补不上(瑞克和莫蒂 S09
+        # 的 AV1 版 10 集实撞)。播放时用的是**所选版本自己的**字幕列表,所以每个版本要各自有。
+        versions = need_versions(md)
+        if not versions:
             continue
+        multi = len(md.get("Media") or []) > 1
+        fnames = []
+        for v in versions:
+            if v["fname"] and v["fname"] not in fnames:
+                fnames.append(v["fname"])
+        fname = fnames[0] if fnames else ""
+        # 候选末条不得超过片长:按缺字幕的版本里最长的那个筛,具体哪份传给哪个版本下面再按各自片长定
+        pdur = max(v["dur"] for v in versions)
 
-        titles = [t for t in (md.get("originalTitle"), md.get("title"),
-                              md.get("grandparentTitle"), clean_title(fname)) if t]
+        titles = [t for t in [md.get("originalTitle"), md.get("title"), md.get("grandparentTitle")]
+                  + [clean_title(f) for f in fnames] if t]
         # 剧集的 title 是**单集名**(如"跨维度电视2"),拿它去查字幕站必然空手 ——
         # 中文字幕站按"剧名 + 季/集"索引。所以剧集改用 grandparentTitle + SxxExx。
         ep = None
@@ -364,10 +446,11 @@ def main():
             show = md["grandparentTitle"]
             queries = ["%s S%02dE%02d" % (show, ep[0], ep[1]),
                        "%s S%02d" % (show, ep[0]), show]
-            titles = [t for t in (show, md.get("originalTitle"), clean_title(fname)) if t]
+            titles = [t for t in (show, md.get("originalTitle")) if t] + [clean_title(f) for f in fnames]
+            titles = [t for t in titles if t]
         else:
             y = md.get("year")
-            names = [t for t in (clean_title(fname), md.get("originalTitle"), md.get("title")) if t]
+            names = [t for t in [clean_title(f) for f in fnames] + [md.get("originalTitle"), md.get("title")] if t]
             queries = ["%s %s" % (t, y or "") for t in names]
             # 年份 ±1:Plex 记的年份(常是上映年)和字幕站条目标的年份(常是首映/版权年)可差一年,
             # 搜索词带年份就漏掉整组条目。《第一头牛》Plex 记 2020,assrt 上唯一带简体 srt 的
@@ -426,7 +509,7 @@ def main():
                 if len(c) < MIN_CUES:
                     why_fail["条目过少"] = why_fail.get("条目过少", 0) + 1
                     continue
-                if c[-1] > dur + 5:
+                if c[-1] > pdur + 5:
                     why_fail["末条超片长"] = why_fail.get("末条超片长", 0) + 1
                     continue
                 # 语言以内容为准(content_rank)。条目的 lang.desc 和文件名都只用来给条目排序:
@@ -446,42 +529,10 @@ def main():
             done += 1
             continue
 
-        truth, votes = consensus([p["last"] for p in probed])
-        agree = [p for p in probed if abs(p["last"] - truth) <= 60.0]
-        if not agree:
-            log("NOFIX", "%s -> %d 个候选彼此不一致" % (head, len(probed)))
-            done += 1
-            continue
-        # 只有一个候选时没有佐证可依,退回一条宽松的绝对闸:末条不得早于片长的 75%。
-        # 实测《办公室 S05E21》:片长 33 分(加长版),而唯一候选是 21 分的电视播出版字幕,
-        # 差了 36% —— 共识机制在样本量为 1 时形同虚设,必须有这道兜底。
-        # 现在每部看 6 个条目,两份同样残缺的字幕(别的剪辑版、分段)互相佐证的机会变大,
-        # 所以这道闸不论票数都要过:整部片的字幕末条不可能离片尾超过四分之一。
-        if (dur - truth) > dur * 0.25:
-            log("NOFIX", "%s -> %d 个候选的末条都在片尾前 %.0fs(%.0f%%),像分段或别的剪辑版,不采用"
-                % (head, votes, dur - truth, 100.0 * (dur - truth) / dur))
-            done += 1
-            continue
-        w = max(agree, key=lambda p: (p["rank"], p["n"]))
-        lang_desc = {3: "双语", 2: "简中", 1: "繁中", 0: "未知"}[w["rank"]]
-        detail = ("%s;%s %d 条,首 %.0fs,末 %.0fs(%d/%d 一致,距片尾 %.0fs,编码 %s)"
-                  % (w["name"][:44], lang_desc, w["n"], w["first"], w["last"],
-                     votes, len(probed), dur - w["last"], w["enc"]))
-        if not args.apply:
-            log("PLAN", "%s -> %s" % (head, detail))
-            done += 1
-            continue
-
-        ext = os.path.splitext(w["name"])[1].lstrip(".").lower() or "srt"
-        q = urllib.parse.urlencode({"title": w["name"], "format": ext})
-        st3, _ = px("POST", "/library/metadata/%s/subtitles?%s" % (rk, q),
-                    body=w["text"].encode("utf-8"),
-                    ctype="text/plain;charset=UTF-8", js=False)
-        if st3 != 200:
-            log("FAIL", "%s -> 上传失败 HTTP %s" % (head, st3))
-            done += 1
-            continue
-        log("UPLOAD", "%s -> %s" % (head, detail))
+        # 搜索和下载只做一次(assrt 有速率限制),挑哪份、传给谁按版本各自定
+        for v in versions:
+            vh = head if not multi else "%s [第%d版 %s]" % (head, v["idx"], v["codec"])
+            pick_and_upload(rk, vh, v, probed)
         done += 1
     if not _logged[0]:
         print("(无需变更，未写 log)")

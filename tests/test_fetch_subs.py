@@ -59,7 +59,10 @@ def srt(n, last, line):
 
 W = {}   # 当前场景:search 返回的条目、各条目详情、各下载地址的字节
 UPLOADS = []
+UPLOAD_MID = []   # 每次上传带的 mediaItemID(没带记 None)
 QUERIES = []   # 本场景发出的 assrt 搜索词
+HANNAH_FILE = ("/rclone/pd_zurg/movies/Hannah.and.Her.Sisters.1986.1080p."
+               "Blu-ray.Remux.AVC.DTS-HD.MA.1.0-KRaLiMaRKo.mkv")
 
 
 def fake_px(method, path, body=None, ctype=None, js=True, timeout=180):
@@ -69,12 +72,12 @@ def fake_px(method, path, body=None, ctype=None, js=True, timeout=180):
         return 200, {"Metadata": [{
             "title": "汉娜姐妹", "originalTitle": "Hannah and Her Sisters", "year": 1986,
             "duration": int(DUR * 1000),
-            "Media": [{"Part": [{"file": "/rclone/pd_zurg/movies/Hannah.and.Her.Sisters.1986.1080p."
-                                         "Blu-ray.Remux.AVC.DTS-HD.MA.1.0-KRaLiMaRKo.mkv",
+            "Media": W.get("media") or [{"Part": [{"file": HANNAH_FILE,
                                  "Stream": [{"streamType": 3, "language": "English", "codec": "pgs"}]}]}]}]}
     if method == "POST" and "/subtitles?" in path:
         q = urllib.parse.parse_qs(path.split("?", 1)[1])
         UPLOADS.append((q.get("title", [""])[0], body))
+        UPLOAD_MID.append(q.get("mediaItemID", [None])[0])
         return 200, b""
     return 404, {}
 
@@ -111,6 +114,7 @@ def run(scene):
     W.clear()
     W.update(scene)
     del UPLOADS[:]
+    del UPLOAD_MID[:]
     del QUERIES[:]
     if os.path.exists(LOG):
         os.remove(LOG)
@@ -239,6 +243,58 @@ lt = run({
     "files": {"http://dl/s1": srt(1500, 6210, SIMP), "http://dl/s2": srt(1500, 6212, BIL.replace("\\N", "\n"))},
 })
 check("双语优先", [n for n, _ in UPLOADS] == [CTRL + ".srt"] and "双语" in lt, str([n for n, _ in UPLOADS]) + " " + lt.strip()[-80:])
+
+print("九、多版本(2026-11-02 瑞克和莫蒂 S09 AV1):按版本判、按版本传,搜索只做一次")
+PGS = {"streamType": 3, "language": "English", "codec": "pgs"}
+ZH_UP = {"streamType": 3, "key": "/library/streams/77", "id": 77, "codec": "srt", "transient": "0"}
+
+
+def ver(mid, codec, streams, dur=DUR, f=HANNAH_FILE):
+    return {"id": mid, "videoCodec": codec, "duration": int(dur * 1000),
+            "Part": [{"file": f, "Stream": streams}]}
+
+
+CTRL_SCENE = {
+    "search": [{"id": 315383, "videoname": CTRL.replace(".", " "), "lang": None}],
+    "detail": {315383: {"filename": CTRL + ".chs.srt", "url": "http://dl/ctrl1", "filelist": []}},
+    "files": {"http://dl/ctrl1": srt(3020, 6210, SIMP)},
+}
+lt = run(dict(CTRL_SCENE, media=[ver(501, "av1", [PGS]), ver(502, "h264", [PGS, ZH_UP])]))
+check("第一版缺、第二版有(语言未知的外挂算有):只传给第一版", UPLOAD_MID == ["501"], str(UPLOAD_MID))
+lt = run(dict(CTRL_SCENE, media=[ver(501, "h264", [PGS, ZH_UP]), ver(502, "av1", [PGS])]))
+check("第一版有、第二版缺:传给第二版(原来合并判断会整集跳过)", UPLOAD_MID == ["502"], str(UPLOAD_MID))
+check("日志标出是第几版", "[第2版 av1]" in lt, lt.strip()[-160:])
+n_single = len(QUERIES)
+lt = run(dict(CTRL_SCENE, media=[ver(501, "av1", [PGS]), ver(502, "h264", [PGS])]))
+check("两版都缺:各传一份,各带自己的 mediaItemID", sorted(UPLOAD_MID) == ["501", "502"], str(UPLOAD_MID))
+check("两版同一个文件名时搜索词不翻倍", len(QUERIES) == n_single, "%d vs %d" % (len(QUERIES), n_single))
+lt = run(dict(CTRL_SCENE, media=[ver(501, "h264", [PGS, ZH_UP])]))
+check("单版本已有中文:不传", UPLOADS == [], str(UPLOAD_MID))
+
+print("十、版本片长不同:候选末条超过短版本片长,只传给长版本")
+lt = run(dict(CTRL_SCENE, media=[ver(501, "h264", [PGS]), ver(502, "av1", [PGS], dur=4000.0)]))
+check("只传给片长够的那一版", UPLOAD_MID == ["501"], str(UPLOAD_MID))
+check("短版本记 NONE 并说明末条超片长", "超过这个版本的片长" in lt, lt.strip()[-160:])
+
+print("十一、上传会顶掉同版本同格式的外挂:有英文 srt 挂载时不传 srt,有 ass 候选就改传 ass")
+EN_MNT = {"streamType": 3, "key": "/library/streams/88", "id": 88, "codec": "srt",
+          "language": "English", "languageCode": "eng", "transient": "1"}
+lt = run(dict(CTRL_SCENE, media=[ver(501, "h264", [PGS, EN_MNT])]))
+check("只有 srt 候选:不传", UPLOADS == [], str([n for n, _ in UPLOADS]))
+check("SKIP 点名会被顶掉的那条", "SKIP" in lt and "id=88" in lt and "挂载" in lt, lt.strip()[-160:])
+sc = dict(CTRL_SCENE)
+sc["search"] = CTRL_SCENE["search"] + [{"id": 21, "videoname": CTRL.replace(".", " "), "lang": {"desc": "简"}}]
+sc["detail"] = dict(CTRL_SCENE["detail"])
+sc["detail"][21] = {"filename": CTRL + ".chs.ass", "url": "http://dl/ass", "filelist": []}
+sc["files"] = dict(CTRL_SCENE["files"])
+sc["files"]["http://dl/ass"] = ass(1500, 6210, SIMP)
+lt = run(dict(sc, media=[ver(501, "h264", [PGS, EN_MNT])]))
+check("另有 ass 候选:改传 ass,不碰英文 srt", [n for n, _ in UPLOADS] == [CTRL + ".chs.ass"],
+      str([n for n, _ in UPLOADS]))
+EN_ASS = dict(EN_MNT, codec="ssa", id=89, key="/library/streams/89")
+lt = run(dict(CTRL_SCENE, media=[ver(501, "h264", [PGS, EN_ASS])]))
+check("已有的是 ssa(不同格式):照传 srt", [n for n, _ in UPLOADS] == [CTRL + ".chs.srt"],
+      str([n for n, _ in UPLOADS]))
 
 print("五、web() 本身:509 重试、其它错误不重试(2026-10-31 起 assrt 超限回 509,原代码把它吞成 0)")
 import urllib.error as UE
