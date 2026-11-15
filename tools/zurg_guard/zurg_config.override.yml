@@ -1,0 +1,57 @@
+# pd_zurg 的 zurg 配置覆盖文件(仓库里的权威副本)。部署位置:NAS /volume1/docker/pd_zurg/config/config.yml(= 容器 /config/config.yml)。
+# zurg/setup.py 每次启动发现它存在,就拿它整份覆盖 /zurg/RD/config.yml,再填 token、port(所以这里留占位即可)。
+# 没有这份覆盖时,运行配置来自镜像里的上游 config.yml(Dockerfile 每次构建现拉上游最新,会漂)。
+#
+# 与上游唯一的差别:enable_repair: false。
+# 原因(2026-11-14 实测):zurg v0.9.3 的自带修复遇到一次偶发 404 就重新提交磁力,RD 对新提交回 451,
+# zurg 便把记录永久标成 Unfixable="infringing torrent" + IsBroken,之后一直回 423(重启不清),
+# 而 RD 上的旧缓存其实一直能读。全库 45 条被这样锁住,39 条能读。修复的职责改由
+# tools/zurg_guard/zurg_guard.py 承担:每 10 分钟,先用 RD 直连验证,再清误标或在没人看时重启 zurg。
+zurg: v1
+token: yourtoken
+# host: "[::]"
+# port: 9999
+# username:
+# password:
+# proxy:
+# concurrent_workers: 20
+check_for_changes_every_secs: 10
+# repair_every_mins: 60
+# ignore_renames: false
+# retain_rd_torrent_name: false
+# retain_folder_name_extension: false
+enable_repair: false  # 自带修复会把偶发 404 变成永久 423,改由 tools/zurg_guard 接管
+auto_delete_rar_torrents: true
+# api_timeout_secs: 15
+# download_timeout_secs: 10
+# enable_download_mount: false
+# rate_limit_sleep_secs: 6
+# retries_until_failed: 2
+# network_buffer_size: 4194304 # 4MB
+# serve_from_rclone: false
+# verify_download_link: false
+# force_ipv6: false
+on_library_update: sh plex_update.sh "$@"
+#for windows comment the line above and uncomment the line below:
+#on_library_update: '& powershell -ExecutionPolicy Bypass -File .\plex_update.ps1 --% "$args"'
+
+directories:
+  anime:
+    group_order: 10
+    group: media
+    filters:
+      - regex: /\b[a-fA-F0-9]{8}\b/
+      - any_file_inside_regex: /\b[a-fA-F0-9]{8}\b/
+
+  shows:
+    group_order: 20
+    group: media
+    filters:
+      - has_episodes: true
+
+  movies:
+    group_order: 30
+    group: media
+    only_show_the_biggest_file: true
+    filters:
+      - regex: /.*/
