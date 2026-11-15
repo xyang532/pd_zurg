@@ -16,6 +16,9 @@ fix_subs —— 自动挑一条**时间轴对得上**的中文字幕挂到 Plex 
 import argparse, io, json, os, re, sys, time
 import urllib.request, urllib.parse, urllib.error
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import upload_guard  # noqa: E402  末条覆盖闸(第 3 条)与 fetch_subs 共用;拷进容器时随脚本一起拷
+
 # 两个路径可用环境变量改指,只为单测能在容器外跑、且不往真日志里写假行
 LOG_PATH = os.environ.get("SUBS_LOG", "/log/subs.log")
 SETTINGS = os.environ.get("PD_SETTINGS", "/config/settings.json")
@@ -349,10 +352,11 @@ def main():
         else:
             truth, votes = consensus([p[4] for p in probed])
             agree = [p for p in probed if abs(p[4][2] - truth) <= 60.0]
-            # 单个候选无从比对,退回一条宽松的绝对判据:末条不得早于片长的 75%
-            if len(probed) == 1 and (dur - probed[0][4][2]) > dur * 0.25:
-                log("NOFIX", "%s -> 只有 1 个候选且末条距片尾 %.0fs,无从佐证,不挂"
-                    % (head, dur - probed[0][4][2]))
+            # 末条不得早于片长的 75%,**不论几票**(upload_guard 第 3 条):原来只管单候选,
+            # 分 CD / 别集的字幕抱团时照样过 —— 越狱 S04E02 就这样挂上了 4/4 一致的 S04E05 字幕
+            if upload_guard.tail_too_far(dur, truth):
+                log("NOFIX", "%s -> %d/%d 个候选的末条都在片尾前 %.0fs(%.0f%%),像分段、别集或别的剪辑版,不挂"
+                    % (head, votes, len(probed), dur - truth, 100.0 * (dur - truth) / dur))
             else:
                 winner = max(agree, key=lambda p: (p[0], p[1])) if agree else None
                 if winner is None:

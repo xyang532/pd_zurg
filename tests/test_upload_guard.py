@@ -11,6 +11,15 @@ else:
     raise SystemExit("找不到 upload_guard.py")
 import upload_guard as U
 
+# 第 3 条:末条覆盖闸
+assert U.tail_too_far(7818, 3749), "致命魔术 CD1(末条 1:02:29,片长 130 分)必须拦"
+assert U.tail_too_far(5186, 2598), "越狱 S04E02 挂 S04E05(覆盖 50%)必须拦"
+assert not U.tail_too_far(7818, 7498), "整片字幕(片尾演职员表 5 分钟)要放行"
+assert not U.tail_too_far(9000, 9000 - 840), "大片片尾字幕 14 分钟要放行(哈利波特实测)"
+assert not U.tail_too_far(0, 100), "片长未知不判"
+assert not U.tail_too_far(1000, 750) and U.tail_too_far(1000, 749), "边界:正好 75% 放行"
+print("ok  tail_too_far 6 条")
+
 fails = []
 
 

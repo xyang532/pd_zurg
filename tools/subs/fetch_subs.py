@@ -359,12 +359,12 @@ def pick_and_upload(rk, head, v, probed):
     if not agree:
         log("NOFIX", "%s -> %d 个候选彼此不一致" % (head, len(pool)))
         return
-    # 只有一个候选时没有佐证可依,退回一条宽松的绝对闸:末条不得早于片长的 75%。
+    # 末条不得早于片长的 75%(upload_guard 第 3 条)。最初只为单候选设:没有佐证可依。
     # 实测《办公室 S05E21》:片长 33 分(加长版),而唯一候选是 21 分的电视播出版字幕,
     # 差了 36% —— 共识机制在样本量为 1 时形同虚设,必须有这道兜底。
     # 现在每部看 6 个条目,两份同样残缺的字幕(别的剪辑版、分段)互相佐证的机会变大,
     # 所以这道闸不论票数都要过:整部片的字幕末条不可能离片尾超过四分之一。
-    if (vdur - truth) > vdur * 0.25:
+    if upload_guard.tail_too_far(vdur, truth):
         log("NOFIX", "%s -> %d 个候选的末条都在片尾前 %.0fs(%.0f%%),像分段或别的剪辑版,不采用"
             % (head, votes, vdur - truth, 100.0 * (vdur - truth) / vdur))
         return
