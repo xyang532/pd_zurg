@@ -153,9 +153,10 @@ check("记 FIXED", "FIXED" in lg)
 check("只挂了两次(没有多余的重挂)", pl.puts == 2, "puts=%d" % pl.puts)
 
 print("\n[3] 顶替语义,赢家恰好最后挂:不需要重挂")
-pl = FakePlex([(WIN, srt(452, 650, 6896)), (LOSE, srt(900, 5, 5000))])
+# 末条 6000s(覆盖 80%):两个候选不一致时共识取较早那个,且要过「末条 ≥ 片长 75%」那道闸
+pl = FakePlex([(WIN, srt(452, 650, 6896)), (LOSE, srt(900, 5, 6000))])
 lg = run(pl)
-check("赢家(末条 5000s 那个)在片上", pl.ext() == [LOSE], str(pl.ext()))
+check("赢家(末条 6000s 那个)在片上", pl.ext() == [LOSE], str(pl.ext()))
 check("记 FIXED", "FIXED" in lg)
 check("只挂了两次", pl.puts == 2, "puts=%d" % pl.puts)
 
@@ -186,6 +187,14 @@ lg = run(pl, mode="recheck")
 check("记'摘掉既有字幕'(末条超片长那条 DROP)", u"摘掉既有字幕" in lg)
 check("片上只剩赢家", pl.ext() == [WIN], str(pl.ext()))
 check("记 FIXED", "FIXED" in lg)
+
+print("\n[8] 分 CD / 别集的字幕抱团成假共识:多票一致但只到片长一半,也不许挂(越狱 S04E02、致命魔术)")
+CD1A, CD1B = "Perfect.Days.2023.1080p.BluRay.x264.CD1.chs", "Perfect.Days.2023.1080p.BluRay.x264-cd1.cht"
+pl = FakePlex([(CD1A, srt(420, 40, 3700)), (CD1B, srt(400, 30, 3690))])
+lg = run(pl)
+check("片上不留任何候选", pl.ext() == [], str(pl.ext()))
+check("记 NOFIX 且说明是覆盖不够", "NOFIX" in lg and u"片尾前" in lg, lg.strip()[-160:])
+check("不记 FIXED", "FIXED" not in lg)
 
 print("\n%s" % ("全部通过" if not fails else "失败 %d 项: %s" % (len(fails), fails)))
 sys.exit(1 if fails else 0)

@@ -60,7 +60,7 @@ done
 
 run_in_container() {
   _f=$1; shift
-  # upload_guard.py 是 fetch_subs 会 import 的同目录模块,跟着一起拷
+  # upload_guard.py 是 fetch_subs、fix_subs 都会 import 的同目录模块,跟着一起拷
   for _c in "$_f" upload_guard.py; do
     "$DOCKER" cp "$TOOLS/$_c" "pd_zurg:/tmp/$_c" >/dev/null 2>&1 || {
       echo "$(stamp) ABORT    docker cp $_c 失败" >> "$LOG"

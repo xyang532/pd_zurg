@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""往 Plex 上传字幕之前的两条规矩,fetch_subs(容器里)和 align_subs(宿主机)共用这一份。
+"""往 Plex 上传/挂载字幕之前的规矩,fetch_subs、fix_subs(容器里)和 align_subs(宿主机)共用这一份。
 
 1. **按版本上传**。同一集/同一部挂了两个文件(两个 Media),上传接口
    `POST /library/metadata/{rk}/subtitles` 不带 `mediaItemID` 时一律落到 `Media[0]`;
@@ -10,7 +10,21 @@
    都会消失,服务端日志里没有删除记录;不同格式(srt 与 ass)可以并存;新传的自动成为选中。
    全库 125 份上传字幕,同版本同格式两份的情况是 0 例。所以上传前必须先看会顶掉谁 ——
    用户手工传的字幕不能被我们的自动流程顶掉。
+
+3. **整片字幕的末条不得早于片长的 75%,不论几个候选一致**。分 CD 的字幕(CD1/CD2 各约半部)、
+   别集的字幕、别的剪辑版字幕会彼此抱团成"假共识":实测越狱 S04E02(双集合并,5186s)挂上
+   4/4 一致的 S04E05 字幕,末条 2598s;《爵士春秋》2/4 抱团在 CD2 的 3631s;《致命魔术》挂着 CD1
+   (末条 1:02:29,片长 130 分),用户看到一半字幕没了。大片片尾字幕最长约 14 分钟,25% 的余量足够。
 """
+
+# 末条离片尾超过片长的这个比例 = 不是整片字幕。fetch_subs / fix_subs 只认这一份
+MAX_TAIL_GAP = 0.25
+
+
+def tail_too_far(duration, last):
+    """末条离片尾超过片长的 MAX_TAIL_GAP(分段、别集或别的剪辑版的字幕)。片长未知时不判。"""
+    return duration > 0 and (duration - last) > duration * MAX_TAIL_GAP
+
 
 # Plex 的 codec 名:.ssa 传上去和 .ass 视作同一种(都是 ASS 家族),宁可多拦不漏拦
 _FAMILY = {"ssa": "ass"}
