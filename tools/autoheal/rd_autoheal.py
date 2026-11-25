@@ -34,6 +34,19 @@ MIN_SIZE_RATIO = 0.80     # 替换件体积不得低于原件的这个比例
 MAX_429_RETRY = 4         # 被限流就退避重试,重试完还是 429 就当"没测到"
 CTX = ssl.create_default_context()
 
+try:
+    import rd_policy  # 镜像里的 /plex_debrid/rd_policy.py:加种节拍 + RD 拒收名单,与 plex_debrid 共用一份
+except ImportError as e:
+    # 本脚本的 stderr 进不了 autoheal.log(autoheal.sh 只把它交给 DSM),所以自己写一行,别静默
+    _msg = "%s ABORT   导入 rd_policy 失败(%s):镜像里的 /plex_debrid 还没有它,先上新镜像再跑自愈\n" % (
+        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), e)
+    try:
+        with io.open(LOG_PATH, "a", encoding="utf-8") as _f:
+            _f.write(_msg)
+    finally:
+        sys.stderr.write(_msg)
+    sys.exit(2)
+
 ap = argparse.ArgumentParser()
 ap.add_argument("--apply", action="store_true", help="真的执行替换(默认干跑)")
 ap.add_argument("--rate", type=float, default=1.0, help="RD 调用速率上限,次/秒")
@@ -401,9 +414,12 @@ def try_replace(meta, rel, need_bytes, want_ep, old_id=None, old_hash=None):
     """
     if old_hash and rel.hash and rel.hash.lower() == old_hash.lower():
         return None, "与现有片源同一个 hash,跳过"
+    rd_policy.wait_turn()  # 与 plex_debrid 共用一个节拍文件:整个账号两次加种至少隔 rd_policy.ADD_INTERVAL
     st, res = rd("/torrents/addMagnet", {"magnet": "magnet:?xt=urn:btih:" + rel.hash})
     nid = res.get("id") if isinstance(res, dict) else None
     if not nid:
+        if st == 451:
+            return None, "addMagnet HTTP 451(名字不在 RD 拒收名单里,多半是这个 hash 被版权下架)"
         return None, "addMagnet HTTP %s" % st
     if old_id and nid == old_id:
         # RD 认出是同一个种子,直接返回了原件的 id —— 绝不能 delete,原样退出
@@ -531,6 +547,16 @@ def main():
         head = "%s%s %s %.2fGB %sp" % (note, meta["imdb"], fn[:48], need / 1e9, meta["res"])
         if not cands:
             log("NOFIX", "%s —— 三源合计 0 个合格候选" % head)
+            return 0
+        # RD 见名即拒的不去加:加了也是 451,还白占一个加种间隔(rd_policy.ADD_INTERVAL)
+        refused = [(r, rd_policy.refused_name(r.title)) for r in cands]
+        n_ref = sum(1 for _, s in refused if s)
+        cands = [r for r, s in refused if not s]
+        if n_ref:
+            ex, s = next((r, s) for r, s in refused if s)
+            log("TRY", "%s 跳过 %d 个名字被 RD 拒收的候选(如 %s 含「%s」),没加" % (head, n_ref, ex.title[:48], s))
+        if not cands:
+            log("NOFIX", "%s —— 合格候选的名字全被 RD 拒收" % head)
             return 0
         if not args.apply:
             log("PLAN", "%s -> 候选 %d 个,首选 %s (%.2fGB, %s)"
