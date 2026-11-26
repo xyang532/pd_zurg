@@ -3,6 +3,7 @@ from base import *
 from ui.ui_print import *
 import releases
 import threading
+import rd_policy
 
 # (required) Name of the Debrid service
 name = "Real Debrid"
@@ -80,26 +81,23 @@ def post(url, data):
 # minute: on 2026-10-29 plex_debrid sent ~54 adds a minute and only ~10 got through. A 429'd release was never judged
 # by RD, yet it used to be skipped like a bad one and the item counted as "nothing found" (and cooled down for 12h).
 # So: space adds out below that rate, and on a 429 wait and retry the same release instead of moving on.
-add_interval = 7.5          # seconds between two addMagnet calls (~8 a minute)
+# 2026-11-24: two adds less than 20 s apart trip a second, silent throttle that answers 451 infringing_file (not 429)
+# to every add for a while. The spacing and RD's name filter live in rd_policy, shared with tools/autoheal.
+add_interval = rd_policy.ADD_INTERVAL  # seconds between two addMagnet calls on the whole account
 add_backoff = [15, 30, 60]  # waits before retrying the same release after a 429
 add_lock = threading.Lock()
-last_add = 0.0
 
 def rate_limited(response):
     return hasattr(response, 'error') and response.error == 'too_many_requests'
 
 def add_magnet(magnet, title=''):
-    global last_add
     response = None
     for attempt, wait in enumerate([0] + add_backoff):
         if wait:
             ui_print(f'[realdebrid]: rate limited (429) when adding {title}, retrying the same release in {wait}s ({attempt}/{len(add_backoff)})')
             time.sleep(wait)
         with add_lock:
-            delay = last_add + add_interval - time.time()
-            if delay > 0:
-                time.sleep(delay)
-            last_add = time.time()
+            rd_policy.wait_turn()  # cross-process: plex_debrid threads and autoheal queue on one stamp file
         response = post('https://api.real-debrid.com/rest/1.0/torrents/addMagnet', {'magnet': magnet})
         if not rate_limited(response):
             return response
@@ -167,6 +165,11 @@ def download(element, stream=True, query='', force=False):
     for release in cached[:]:
         try:  # if release matches query
             if regex.match(query, release.title,regex.I) or force:
+                refused = rd_policy.refused_name(release.title)
+                if refused:
+                    # RD refuses this name on sight; trying would only burn one add slot (rd_policy.ADD_INTERVAL)
+                    ui_print(f'[realdebrid]: skipping {release.title}: Real-Debrid refuses names containing "{refused}" (not added).')
+                    continue
                 response = add_magnet(release.download[0], release.title)
                 if rate_limited(response):
                     # still 429 after backing off: trying the remaining releases now would only be 429'd too.
@@ -175,7 +178,9 @@ def download(element, stream=True, query='', force=False):
                     ui_print(f'[realdebrid]: still rate limited after {len(add_backoff)} retries, leaving {release.title} and the remaining releases for the next round.')
                     return False
                 if hasattr(response, 'error') and response.error == 'infringing_file':
-                    ui_print(f'[realdebrid]: torrent {release.title} marked as infringing... looking for another release.')
+                    # The name passed rd_policy's filter and adds are spaced, so this is a takedown of this hash
+                    # or a filter string RD added after rd_policy was written. Logged distinctly so the latter shows up.
+                    ui_print(f'[realdebrid]: torrent {release.title} refused by Real-Debrid (451 infringing_file, name not on the known filter list)... looking for another release.')
                     time.sleep(0.5)
                     continue
                 elif hasattr(response, 'error') and response.error == 'too_many_active_downloads':

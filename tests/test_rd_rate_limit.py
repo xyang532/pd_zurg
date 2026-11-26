@@ -6,6 +6,8 @@ RD 限流(429)单测。锁死的性质:
   · 重试用完仍 429:给条目打 rate_limited、本轮不再试剩下的候选
   · 带 rate_limited 的那轮 watch() 不计失败、不进冷却;下一轮照常计数
   · debrid_download 只认本次调用里打的标记来停循环,但保留之前的标记给 watch()
+  · (11-24)加种间隔 ≥ 20 秒,且跨进程:节拍文件里别的进程(autoheal)的时间也算;文件坏了退回进程内并吭声
+  · (11-24)名字命中 RD 拒收名单的候选不加;名单外的 451 照常换下一个,不当限流
 
 背景:10-29 debug 6 分钟 293 次 addMagnet,233 次 429;被 429 的候选 RD 根本没判,条目却被记成"没找到"进 12h 冷却。
 跑法(容器里): docker cp 仓库的 plex_debrid 和 tests 到同一目录,/venv/bin/python3 tests/test_rd_rate_limit.py
@@ -27,6 +29,8 @@ os.chdir("/")  # trakt 模块导入时从当前目录的 .env 读凭据,和正�
 import ui  # 照 main.py 的顺序先导 ui;直接导 content 会撞上 plex_debrid 模块间的循环 import
 from content import classes
 from debrid.services import realdebrid as rd
+import rd_policy
+assert os.path.dirname(os.path.abspath(rd_policy.__file__)) == PD, "rd_policy 不是被测目录里那份: %s" % rd_policy.__file__
 
 # 假时钟:sleep 只推进时间、记下睡了多久
 CLOCK = [1_800_000_000.0]
@@ -35,6 +39,7 @@ time.time = lambda: CLOCK[0]
 time.sleep = lambda s: (SLEEPS.append(round(s, 3)), CLOCK.__setitem__(0, CLOCK[0] + s))
 
 TMP = tempfile.mkdtemp(prefix="rd_rate_limit_test_")
+rd_policy.STAMP_PATH = os.path.join(TMP, "rd_last_add")  # 别碰正式的 /config/rd_last_add
 classes.retry_after.path = os.path.join(TMP, "retry_after.json")
 classes.retry_after.entries = None
 
@@ -60,7 +65,9 @@ def fake_post(answers):
 
 
 def reset():
-    POSTS.clear(); SLEEPS.clear(); rd.last_add = 0.0
+    POSTS.clear(); SLEEPS.clear(); rd_policy._last[0] = 0.0
+    if os.path.isfile(rd_policy.STAMP_PATH):
+        os.remove(rd_policy.STAMP_PATH)
 
 
 # 1. 429 两次后 RD 给出真判定(451):三次都发的是同一个候选,中间按 add_backoff 等
@@ -137,6 +144,49 @@ CALLS.clear(); classes.debrid.download = plain_fail
 m = media_with_releases(3); m.rate_limited = True; m.debrid_download()
 expect(CALLS == ["R0", "R1", "R2"], "遗留的旧标记把候选循环截断了: %r" % CALLS)
 expect(m.rate_limited, "遗留的标记在 debrid_download 后丢了(watch 就会误计失败)")
+
+# 6. RD 拒收名单(11-24 事故:14 个带 WEB-DL/WEBRip 的候选全 451)
+expect(rd.add_interval >= 20, "加种间隔低于 RD 的 20 秒门槛: %s" % rd.add_interval)
+for title, want in [
+    ("You.Can.See.Everything.2026.REPACK2.1080p.AMZN.WEB-DL.DDP5.1.Atmos.H.264-CHORTLE", "WEB-DL"),
+    ("You.Can.See.Everything.2026.1080p.AMZN.WEB.DL.DDP5.1.H.264-CHORTLE {imdb-tt45368240}", None),  # 点号放行(实测 201)
+    ("Some.Movie.2020.1080p.web-dl.x264", None),            # WEB-DL 只在大小写完全一致时拒
+    ("Some.Movie.2020.1080p.webrip.x265", "webrip"),        # WEBRip 不分大小写
+    ("Some.Movie.2020.1080p.BluRay-x264", None),            # 分隔符换掉就放行
+    ("Some.Movie.2020.1080p.BluRay.x264-GRP", "BluRay.x264"),
+    ("Some.Movie.2020.1080p.BluRay.DTS-HD.MA.5.1", "p.BluRay.DTS"),
+    ("Big Buck Bunny", None), ("", None), (None, None),
+]:
+    got = rd_policy.refused_name(title)
+    expect(got == want, "refused_name(%r) = %r,应为 %r" % (title, got, want))
+
+# 7. download():名字被拒的候选不加(不占加种间隔),直接试下一个;名单外的 451 照常换下一个
+reset(); rd.post = fake_post([R451])
+el = SimpleNamespace(Releases=[SimpleNamespace(title="X.2026.1080p.AMZN.WEB-DL.H.264-G", download=["magnet:refused"]),
+                               SimpleNamespace(title="X.2026.1080p.AMZN.WEB.DL.H.264-G", download=["magnet:ok"])],
+                     deviation=lambda *a, **k: ".*")
+ok = rd.download(el)
+expect(POSTS == ["magnet:ok"], "名字被 RD 拒收的候选仍被加了,或下一个没试: %r" % POSTS)
+expect(ok is False and not getattr(el, "rate_limited", False), "名单外 451 被当成限流了")
+
+# 8. 跨进程节拍:别的进程 5 秒前刚加过(节拍文件里的时间),这次要再等 16 秒,并把自己的时间写回去
+reset()
+with open(rd_policy.STAMP_PATH, "w") as fh:
+    fh.write("%.3f" % (CLOCK[0] - 5))
+slept = rd_policy.wait_turn()
+expect(abs(slept - (rd_policy.ADD_INTERVAL - 5)) < 1e-6, "没按节拍文件里别的进程的时间等: 睡了 %.3f" % slept)
+with open(rd_policy.STAMP_PATH) as fh:
+    expect(abs(float(fh.read()) - CLOCK[0]) < 1e-3, "加完没把自己的时间写回节拍文件")
+
+# 9. 节拍文件用不了:退回进程内节拍(仍然隔够),并在 stderr 说一次
+import io, contextlib
+reset(); saved = rd_policy.STAMP_PATH; rd_policy.STAMP_PATH = TMP  # 是个目录,打不开成文件
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    rd_policy.wait_turn(); t0 = CLOCK[0]; rd_policy.wait_turn()
+rd_policy.STAMP_PATH = saved
+expect(abs(CLOCK[0] - t0 - rd_policy.ADD_INTERVAL) < 1e-6, "节拍文件坏了以后进程内也不节流了")
+expect("节拍文件" in err.getvalue(), "节拍文件用不了却没吭声")
 
 if fails:
     print("FAIL %d 条:" % len(fails))

@@ -21,6 +21,8 @@ for cand in (os.path.join(HERE, "..", "tools", "autoheal", "rd_autoheal.py"),
 else:
     raise SystemExit("找不到 rd_autoheal.py")
 print("被测模块: %s" % TARGET)
+# rd_autoheal 导入 rd_policy:镜像里没有时(新镜像上线前)用仓库里那份;追加在末尾,容器自己的模块仍优先
+sys.path.append(os.path.abspath(os.path.join(HERE, "..", "plex_debrid")))
 spec = importlib.util.spec_from_file_location("ah", TARGET)
 ah = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ah)
