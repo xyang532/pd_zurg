@@ -47,7 +47,14 @@ directories:
     group_order: 20
     group: media
     filters:
-      - has_episodes: true
+      # 社区为绕 RD 名字过滤做的改名版带 {imdb-tt…} 后缀,has_episodes 会把这类电影误判成剧
+      # (11-24:shows 里 2 部、movies 里 0 部,电影库看不见)。带这个后缀的,包里真有 SxxExx 集号才算剧。
+      - and:
+        - has_episodes: true
+        - not_regex: /\{imdb-tt\d+\}/
+      - and:
+        - has_episodes: true
+        - any_file_inside_regex: /s\d{1,2}e\d{1,3}/i
 
   movies:
     group_order: 30
